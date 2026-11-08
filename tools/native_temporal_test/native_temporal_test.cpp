@@ -549,6 +549,11 @@ void run(){
     }
     check(scaled.close(scaled.context)==S_OK,"separation: close");
   }
+  // FSR 4.1 is its own external engine: bit 1 (external) and bit 9 (kTemporalFlagFsr4), never bit 6 (FSR 3.1), 7 (XeSS) or 8 (the map's kTemporalFlagMapKeep); it upscales as fsr does.
+  // This is the fifteenth of native_temporal.cpp's sixteen pool channels, which channels are never returned to.
+  auto fsr4=acquire(d,16,"fsr4");f=frame(16,1);begin(fsr4,f);check(treat(fsr4,1,0,source.Get())==S_OK,"FSR 4 call");c=calls.back();
+  check((c.flags&2)&&(c.flags&edvr::kTemporalFlagFsr4)&&!(c.flags&64)&&!(c.flags&128)&&!(c.flags&edvr::kTemporalFlagMapKeep)&&c.outW==480&&c.outH==360,"FSR 4 asks for an external engine under its own flag bit, at the recommended size");
+  check(fsr4.close(fsr4.context)==S_OK,"FSR 4 close");
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;
   require(client.acquire(GetModuleHandleW(nullptr),d.device.Get(),15)==S_OK,"actual client validates provider table");
   edvr::openxr::GeometryInput g{};g.generation=1;g.sequence=1;g.displayTime=1;g.headPose.orientation.w=1;

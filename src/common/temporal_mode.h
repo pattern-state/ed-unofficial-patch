@@ -15,6 +15,7 @@ inline bool temporalModeEnabled(const std::string& mode) {
            _stricmp(mode.c_str(), "dlaa") == 0 ||
            _stricmp(mode.c_str(), "dlss") == 0 ||
            _stricmp(mode.c_str(), "fsr") == 0 ||
+           _stricmp(mode.c_str(), "fsr4") == 0 ||
            _stricmp(mode.c_str(), "xess") == 0;
 }
 
@@ -75,6 +76,8 @@ inline bool temporalMapMoved(TemporalMapMotion& m, uint64_t changes) {
 // reads both bits to decide whether the next frame is jittered; the flags bit 8 (kTemporalFlagMapKeep) on edvrTemporalAa hands the pass the decision.
 inline std::atomic<unsigned>& temporalMapStillBits() { static std::atomic<unsigned> bits{0}; return bits; }
 inline constexpr unsigned kTemporalFlagMapKeep = 256u;
+// Bit 9 of the same flags: with bit 1 set, the external engine is AMD's FSR 4.1 (fsr4_engine.h), never with bit 6 (FSR 3.1) or 7 (XeSS).
+inline constexpr unsigned kTemporalFlagFsr4 = 512u;
 
 // THE SYSTEM MAP'S CLOSE VIEW: a body fills enough of the view that its surface's detail shows (galaxy_map_ui.cpp sets this each frame, galaxy_map_ui.h bodyFillsView). The scene there is the body, which writes depth, and the
 // backdrop; every line and icon went to the UI layer. The camera's rows move those exactly, so the history stays through the map camera's moves. A reset there leaves the surface's fine terrain an aliased half-resolution frame,
@@ -235,19 +238,22 @@ struct TemporalFootTracker {
 };
 
 // Which history the temporal pass hands the frame to. Own is the pass's own
-// clip; Nvidia, Amd and Intel are the external, trained upscalers (docs\
+// clip; Nvidia, Amd, Intel and AmdFsr4 are the external, trained upscalers (docs\
 // fsr-upscaler-design-2026-09-16.md, section 3); Intel is XeSS-SR. Anything the mode string
 // does not name (off included) reads as Own: off never reaches the seam,
 // and an unrecognised value already falls back to the pass's own history
 // (temporalModeEnabled above), so there is nothing else to run.
 // Intel is XeSS-SR, the third external engine (the VR eye pass runs it per eye; flat runs it through flat_mono_resolve).
-enum class TemporalEngine { Own, Nvidia, Amd, Intel };
+// AmdFsr4 is AMD's FSR 4.1 through AMD's own D3D12 runtime (fsr4_engine.h), the fourth external engine: the readers that
+// only ask for an external engine count it (temporalExternalEngine), and Amd stays FSR 3.1's alone (its warm, its reactive mask).
+enum class TemporalEngine { Own, Nvidia, Amd, Intel, AmdFsr4 };
 
 inline TemporalEngine temporalEngineFor(const std::string& mode) {
     if (_stricmp(mode.c_str(), "dlaa") == 0 || _stricmp(mode.c_str(), "dlss") == 0) {
         return TemporalEngine::Nvidia;
     }
     if (_stricmp(mode.c_str(), "fsr") == 0) return TemporalEngine::Amd;
+    if (_stricmp(mode.c_str(), "fsr4") == 0) return TemporalEngine::AmdFsr4;
     if (_stricmp(mode.c_str(), "xess") == 0) return TemporalEngine::Intel;
     return TemporalEngine::Own;
 }

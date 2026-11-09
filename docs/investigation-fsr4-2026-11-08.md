@@ -1,8 +1,8 @@
 # FSR 4 investigation (2026-11-08)
 
-Flights and provider findings for FSR 4 as this branch ships it: 4.1.1 on Proton.
-The FSR 4.1.2 design, plan and later findings (Proton-CachyOS, ML frame generation)
-are on branch `fsr4-1-2` of `pattern-state/ed-unofficial-patch`.
+Flights and provider findings for FSR 4. Branch `fsr4-1-1` ships 4.1.1 on Proton and
+carries this file up to Flight 5. Branch `fsr4-1-2` adds the 4.1.2 work below it:
+Proton-CachyOS, the Wine crash that blocks it, and ML frame generation.
 
 ## Status
 
@@ -26,8 +26,7 @@ are on branch `fsr4-1-2` of `pattern-state/ed-unofficial-patch`.
   F8 row text truncates ("FSR 4 (unavai..."), the status line overflows its box, and the
   footer's "saved" overlaps the version string when the describe string is long ("-dirty").
 - **Not flown:** VR; Windows; the 4.1.2 re-pin (Phase 1).
-- Design and plan: branch `fsr4-1-2`, `docs/design-fsr4-1-2-2026-11-07.md` and
-  `.agents/plan-fsr4-1-2-2026-11-07.md`.
+- Design: `docs/design-fsr4-1-2-2026-11-07.md`. Plan: `.agents/plan-fsr4-1-2-2026-11-07.md`.
 
 ## Rig
 
@@ -214,3 +213,56 @@ footer's "saved" still overlaps the version string.
 - The copy route below 1.0 is the input the quality modes will use: check its image (HUD,
   ghosting, the station streaks Sean noted) against the HDR route at 1.0.
 - The HUD with HUD anti-aliasing on, under `fsr4` and `fsr`.
+
+## Provider check: Proton-CachyOS (2026-11-09)
+
+No game. A small D3D12 program lists what AMD's runtime offers through `ffxQuery`
+(`GET_VERSIONS`) on the RX 9070 XT, with the runtime DLLs beside it. It creates no context.
+Scratch Windows 11 prefixes, `FSR4_UPGRADE=1`. Proton-CachyOS 11.0-20261015.
+
+| Proton | SDK runtime DLLs | Driver file beside it | Upscale offered | Frame generation offered |
+|---|---|---|---|---|
+| Experimental | any | any | up to 4.1.1 | 3.1.6 only |
+| CachyOS | 2.4 | Proton's 2.3.0.2913 | 4.1.2, 3.1.6, 2.3.4 | 4.0.2, 3.1.6 |
+| CachyOS | 2.4 | 2.4.0.4541 | 4.1.2, 3.1.6, 2.3.4 | 4.0.2, 3.1.6 |
+| CachyOS | 2.3.0 | 2.4.0.4541 | 4.1.2 (driver), 4.1.1, 3.1.5, 2.3.4 | 4.0.2 (driver), 4.0.1, 3.1.6 |
+
+- On CachyOS the SDK 2.4 DLLs alone offer FSR 4.1.2 and ML frame generation 4.0.2. Their
+  ids lack the driver-provider bit (`0x80…`): the 4.x code ships in AMD's redistributable
+  DLLs and is enabled when the driver layer reports ML support. CachyOS's `amdxc64` shim
+  reports it; Valve's does not. No user-supplied driver file is needed there.
+- `MLFG_UPGRADE` made no difference to what is offered.
+- Not yet shown: that these contexts create and dispatch.
+
+## Flight 6: Proton-CachyOS, development game (2026-11-09)
+
+The development prefix copied for CachyOS (`proton-compatdata-cachyos`); the original is
+never run under it. SDK 2.4 DLLs, `FSR4_UPGRADE=1`, `temporal_aa = fsr4`.
+
+Elite exits about 4 s after launch, during audio start-up, before any FSR 4 code runs (no
+`fsr4:` lines in the log). Elite's minidump: exception `0x80000100`, Wine's unimplemented
+function stub. Stack: `kernelbase` <- `setupapi` <- `portaudio_x64.dll`. The function is
+`setupapi.dll.SetupDiGetDeviceInterfaceAlias`.
+
+- The function is a stub in upstream Wine, Valve's `proton_11.0` and `experimental_11.0`,
+  and CachyOS. Upstream bug: [WineHQ 60081](https://bugs.winehq.org/show_bug.cgi?id=60081).
+  The `CM_Get_Device_Interface_AliasW` it is said to wrap is a stub too.
+- The caller is PortAudio's WDM-KS host API. It enumerates `KSCATEGORY_AUDIO` interfaces
+  and asks each for its `KSCATEGORY_RENDER` or `KSCATEGORY_CAPTURE` alias.
+- The CachyOS prefix holds eleven `KSCATEGORY_AUDIO` interfaces (the motherboard's USB
+  audio and an SSL 12, with their monitors). The Valve prefix holds none. They come from the
+  downstream `proton-ds5-haptic` patch in GE-Proton and Proton-CachyOS and persist in
+  `system.reg`.
+- Fix: implement the function in Wine (`dlls/setupapi/devinst.c`) with conformance tests,
+  returning `ERROR_NO_SUCH_INTERFACE_DEVICE` when there is no alias, and send it upstream.
+  David has asked WineHQ for a fork. 4.1.2 on Linux is parked until then.
+
+## Next for 4.1.2
+
+- Create an FSR 4.1.2 upscale context and an FG 4.0.2 context under Proton-CachyOS and
+  dispatch once each.
+- With a patched `setupapi.dll`, fly Flight 6 again; expect `picked FSR 4.1.2`.
+- Retire D12 (user-supplied driver file): on CachyOS the SDK 2.4 DLLs suffice.
+- Revise Phase 4 (frame generation): FG 4.0.x on Proton-CachyOS and the Windows driver,
+  FG 3.1.6 on Valve's Proton.
+

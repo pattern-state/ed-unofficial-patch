@@ -203,6 +203,95 @@ notices. The DLSS preset, on the same page, is K by default
 some of the edge contrast the temporal pass trades for calm; 0.3 is a fair
 start.
 
+## FSR 4
+
+`fix.temporal_aa = fsr4` ("FSR 4.1" in the F8 Anti-aliasing row) runs AMD's
+ML-based FSR 4 upscaler. ED-UP runs it in AMD's D3D12 runtime and bridges the
+result back to Elite's D3D11 device.
+
+Status: not in a release or the installer. Tested flat on an RX 9070 XT under
+Proton. Not yet tested on Windows or in VR.
+
+Development install, which adds AMD's FSR 4 SDK runtime
+(`amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll`) and its
+licence:
+
+```
+python tools/install_edvr.py --fsr4
+```
+
+### Use
+
+Select FSR 4.1 in F8, or set `fix.temporal_aa = fsr4`. Set Elite's
+anti-aliasing to Off. Elite's Supersampling sets the render size: 1.0 is native
+anti-aliasing, below 1.0 FSR 4 upscales to the output size.
+
+ED-UP queries AMD's runtime for the FSR versions it offers, uses the highest
+4.x and logs it:
+
+```
+fsr4: AMD's runtime offers FSR 4.1.1, 3.1.5, 2.3.4 for this device (3 versions)
+fsr4: using AMD's provider 4.1.1 (version id 0xF5A5CA1E81001001), the highest 4.x offered
+```
+
+If no 4.x is offered, ED-UP logs what was offered and falls back. It does not
+run FSR 3 as `fsr4`.
+
+### Linux (Proton)
+
+Proton provides the FSR 4 runtime, not ED-UP. Steam launch options:
+
+```
+FSR4_UPGRADE=1 %command%
+```
+
+Without it, only FSR 3.1 is offered and `fsr4` refuses. Proton Experimental
+provides FSR 4.1.1.
+
+### FSR 4.1.2 on Linux (optional, manual)
+
+**Currently broken with this build.** It works with AMD's FSR SDK 2.3.0 runtime
+DLLs. This branch now ships the SDK 2.4 runtime, and with it AMD's runtime
+offers no FSR 4 when the driver file below is present (only FSR 3.1.6 and
+2.3.4). Cause not yet known. Tested 2026-11-08/09 on an RX 9070 XT, Proton
+Experimental, driver file 2.4.0.4541. Without the driver file, FSR 4.1.1 from
+Proton works as described above.
+
+FSR 4.1.2 ships in AMD's Windows driver as `amdxcffx64.dll`. AMD licenses the
+driver to the end user under the
+[AMD Software End User License Agreement](https://www.amd.com/en/legal/eula/amd-software-eula.html).
+ED-UP does not ship, download or distribute this file.
+
+1. Download AMD Software: Adrenalin Edition 26.10.1 or later for Windows from
+   [AMD](https://www.amd.com/en/support/download/drivers.html).
+2. Read the EULA. Continue only if you accept it.
+3. Extract the DLL for your GPU. RX 9000 series, Adrenalin 26.10.2, file
+   version 2.4.0.4541:
+
+   ```
+   7z e whql-amd-software-adrenalin-edition-26.10.2-win11-c.exe \
+     Packages/Drivers/Display/WT6A_INF/B026716/amdxcffx64.dll
+   ```
+
+4. Copy `amdxcffx64.dll` next to `EliteDangerous64.exe`.
+5. Launch with `FSR4_UPGRADE=1 %command%`. Proton's shim loads the copy in the
+   game folder before its own.
+
+Expected log:
+
+```
+fsr4: AMD's runtime offers FSR 4.1.2, 3.1.5, 2.3.4 for this device (3 versions)
+fsr4: using AMD's provider 4.1.2 (version id 0xF5A5CA1E81001002), the highest 4.x offered
+```
+
+The file is for use on your own machine. Do not share or redistribute it, in
+mod packs, game folders or Proton prefixes. Delete it to revert to 4.1.1. Game
+updates may remove it. Check the log for the version in use.
+
+### Windows
+
+AMD's driver provides the FSR 4 runtime. Nothing extra needed. Not yet tested.
+
 ## What it fixes
 
 Almost every one of them has the same shape: something correct on a monitor is

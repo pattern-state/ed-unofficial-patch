@@ -81,7 +81,7 @@ struct State {
   uint32_t width[2]{}, height[2]{};
   uint32_t recW=0,recH=0; bool flipped[2]{};
   uint32_t frameCounter = 0;
-  // The jitter cycle each eye last advertised (jitterCycleFor): 8 for every engine but XeSS and FSR 4, whose ratio sets it.
+  // The jitter cycle each eye last advertised (jitterCycleFor): 8 for every engine but XeSS, whose ratio sets it.
   uint32_t jitterCycle[2]{};
   bool treated[2]{};
   History history[2];

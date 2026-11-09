@@ -280,12 +280,14 @@ inline bool temporalExternalEngineFor(const std::string& mode, bool flatProfile)
 }
 
 // The VR jitter's cycle for one eye that renders w x h toward the runtime's recommended recW x recH. Every engine keeps
-// the fixed eight except XeSS-SR (Intel) and FSR 4 (AmdFsr4), which take ceil(8 x scale^2) phases for the ratio the eye
-// pass upscales by (temporalXessJitterPhases): Intel's minimum, and the figure AMD's FSR 4 jitter table asks for. FSR 3.1
-// (Amd) keeps eight. An eye the pass does not upscale (within 2% of the recommendation on either axis, the pass's own test
+// the fixed eight except XeSS-SR (Intel), which takes ceil(8 x scale^2) phases for the ratio the eye pass upscales by
+// (temporalXessJitterPhases): Intel's minimum. FSR 4 (AmdFsr4) and FSR 3.1 (Amd) keep eight. AMD's FSR 4 jitter table asks
+// for the same ceil(8 x scale^2), but flown 2026-11-09 on an RX 9070 XT / Ryzen 7 9800X3D at 5120x1440, SS 0.5 (flat),
+// any cycle above 8 roughly halved the frame rate (6.95 ms -> ~13 ms present) with FSR 4's dispatch unchanged; the cause
+// is not yet known. An eye the pass does not upscale (within 2% of the recommendation on either axis, the pass's own test
 // in native_temporal.cpp treat()), or an unknown size, takes eight.
 inline uint32_t temporalEyeJitterCycle(TemporalEngine engine, uint32_t w, uint32_t h, uint32_t recW, uint32_t recH) {
-    if ((engine != TemporalEngine::Intel && engine != TemporalEngine::AmdFsr4) || !w || !h || !recW || !recH)
+    if (engine != TemporalEngine::Intel || !w || !h || !recW || !recH)
         return kTemporalJitterCount;
     if (!(w * 50 < recW * 49 && h * 50 < recH * 49)) return kTemporalJitterCount;
     return temporalXessJitterPhases(kTemporalJitterCount, w, h, recW, recH);

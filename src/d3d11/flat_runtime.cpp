@@ -4594,11 +4594,6 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
             if(s.engine==FlatMonoResolveMode::Xess)
                 Log::get().note("flat jitter: XeSS-SR minimum=%u configured=%u effective=%u camera=%s actual=%u",
                     ratioMinimum,configured,phases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
-            // FSR 4 takes AMD's ceil(8 x ratio^2) on the Upstream camera route only; Legacy and Off keep 8 (flatCameraPhaseCount).
-            if(s.engine==FlatMonoResolveMode::Fsr4)
-                Log::get().note("flat jitter: FSR 4 ratio minimum=%u configured=%u effective=%u camera=%s actual=%u (%s)",
-                    ratioMinimum,configured,phases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases),
-                    route==FlatCameraRoute::Upstream?"the ratio cycle applies":"this camera route keeps 8: the ratio cycle waits for the upstream route");
             s.phase.resetHistory();reset();
             s.jitterPhases=phases;
         }

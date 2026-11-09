@@ -94,12 +94,15 @@ inline FlatResolveRoute flatResolveRoute(FlatMonoResolveMode mode,
 // The flat jitter cycle an engine runs, from the count
 // advanced.temporal_aa_jitter_phases gives (`configured`, already read through
 // temporalJitterPhases) and the planned resolve's sizes: R (rW x rH), D
-// (dW x dH) and the negotiated E, zero when none was negotiated. XeSS-SR and
-// FSR 4 take at least ceil(8 x ratio^2) phases for the ratio they upscale R to
-// E by (temporalXessJitterPhases): Intel's minimum, and the figure AMD's FSR 4
-// jitter table asks for (super-resolution-ml.md: 32 at 2x, 18 at 1.5x). Every
-// other engine runs the configured count; FSR 3.1 has the same AMD guidance
-// and keeps the configured count until that is decided for it on its own.
+// (dW x dH) and the negotiated E, zero when none was negotiated. XeSS-SR takes
+// at least ceil(8 x ratio^2) phases for the ratio it upscales R to E by
+// (temporalXessJitterPhases): Intel's minimum. Every other engine runs the
+// configured count. FSR 4 does too: AMD's jitter table (super-resolution-ml.md)
+// asks for the same ceil(8 x ratio^2), but flown 2026-11-09 on an RX 9070 XT /
+// Ryzen 7 9800X3D at 5120x1440, SS 0.5, any cycle above 8 roughly halved the
+// frame rate (6.95 ms -> ~13 ms present) with FSR 4's dispatch unchanged; the
+// cause is not yet known, and the configured key still sets it. FSR 3.1 has
+// the same AMD guidance and keeps the configured count too.
 // No plan, or a refused route, runs the configured count. ratioMinimum is the
 // engine's own minimum at this ratio, for the log; the fixed eight for an
 // engine with none. The camera route then bounds the count
@@ -113,7 +116,7 @@ inline FlatJitterCycle flatJitterCycle(FlatMonoResolveMode mode, uint32_t config
                                        uint32_t negotiatedW, uint32_t negotiatedH) {
     FlatJitterCycle out;
     out.phases = configured;
-    if ((mode != FlatMonoResolveMode::Xess && mode != FlatMonoResolveMode::Fsr4) || !planned) return out;
+    if (mode != FlatMonoResolveMode::Xess || !planned) return out;
     const auto route = flatResolveRoute(mode, rW, rH, dW, dH);
     if (route.refused) return out;
     const uint32_t eW = negotiatedW && negotiatedH ? negotiatedW : route.evalWidth;

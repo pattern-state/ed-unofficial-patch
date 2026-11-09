@@ -331,16 +331,17 @@ int main() {
               temporalXessJitterPhases(24, 5120, 1440, 5120, 1440) == 24, "ratio jitter: 1.0x keeps the configured count");
     }
     {
-        // The VR eye's cycle by engine (temporal_mode.h temporalEyeJitterCycle). FSR 4 is its own engine in VR:
+        // The VR eye's cycle by engine (temporal_mode.h temporalEyeJitterCycle). FSR 4 keeps 8 like the others (longer cycles
+        // halved the frame rate when flown). FSR 4 is its own engine in VR:
         // "fsr4" reads as AmdFsr4, "fsr" as Amd (FSR 3.1), and native_temporal.cpp sets the pass's kTemporalFlagFsr4
         // (bit 9) from AmdFsr4 alone. Eyes of 1440x1584 and 1920x2112 toward 2880x3168 upscale by 2x and 1.5x.
         using edvr::TemporalEngine;
         using edvr::temporalEyeJitterCycle;
         check(edvr::temporalEngineFor("fsr4") == TemporalEngine::AmdFsr4 && edvr::temporalEngineFor("fsr") == TemporalEngine::Amd,
               "VR jitter: fsr4 and fsr are separate engines");
-        check(temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 1440, 1584, 2880, 3168) == 32 &&
-              temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 1920, 2112, 2880, 3168) == 18,
-              "VR jitter: an FSR 4 eye that upscales 2x runs 32, 1.5x runs 18");
+        check(temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 1440, 1584, 2880, 3168) == 8 &&
+              temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 1920, 2112, 2880, 3168) == 8,
+              "VR jitter: an FSR 4 eye that upscales 2x or 1.5x keeps 8");
         check(temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 2880, 3168, 2880, 3168) == 8 &&
               temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 2860, 3150, 2880, 3168) == 8 &&
               temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 0, 3168, 2880, 3168) == 8,

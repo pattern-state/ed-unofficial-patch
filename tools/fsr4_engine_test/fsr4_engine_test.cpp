@@ -214,23 +214,26 @@ bool latchSelfTest() {
                "failed key keeps its precise reason")) return false;
     latch.clearIfDifferent(original);
     if (!check(latch.matches(original), "same key stays failed without retry")) return false;
-    edvr::Fsr4ContextKey changes[12] = {original, original, original, original, original, original,
+    edvr::Fsr4ContextKey changes[13] = {original, original, original, original, original, original, original,
                                         original, original, original, original, original, original};
     ++changes[0].inW; ++changes[1].inH; ++changes[2].outW; ++changes[3].outH;
     changes[4].infiniteDepth = true; changes[5].hdr = true;
     ++changes[6].colourFormat; ++changes[7].depthFormat; ++changes[8].motionFormat; ++changes[9].outFormat;
     changes[10].debugView = true;
     changes[11].exposure = edvr::Fsr4Exposure::Fixed;
+    changes[12].debugChecker = true;
     for (const auto& changed : changes) {
         latch.record(original, "unavailable");
         latch.clearIfDifferent(changed);
         if (!check(!latch.matches(original) && !latch.matches(changed),
-                   "a size, depth, HDR, format, debug view or exposure change clears the failed key")) return false;
+                   "a size, depth, HDR, format, debug view, exposure or debug checker change clears the failed key")) return false;
     }
     // The debug view's create bit is in the key: turning it on or off is a new key, so the context is made again.
     if (!check(!(original == changes[10]), "the debug view is part of the context key")) return false;
     // So is the exposure: AUTO_EXPOSURE is a create flag, and a profile switch between the flat and VR HDR routes is a new key.
     if (!check(!(original == changes[11]), "the exposure is part of the context key")) return false;
+    // And the debug checker: AMD's DEBUG_CHECKING is a create flag too.
+    if (!check(!(original == changes[12]), "the debug checker is part of the context key")) return false;
     latch.record(original, "shared texture failed");
     latch.clear();
     if (!check(!latch.matches(original), "a mode reset clears the failed key")) return false;
@@ -339,6 +342,21 @@ bool flagsSelfTest() {
         !check(edvr::fsr4CreateFlags(false, false, kAutomatic, false) == (kInverted | kAuto | kNonLinear) &&
                edvr::fsr4CreateFlags(true, true, kAutomatic, false) == (kHdr | kInverted | kInfinite | kAuto),
                "debug view off: no DEBUG_VISUALIZATION at create"))
+        return false;
+    // AMD's debug checker (advanced.fsr4_debug_checker, a diagnostic, off by default): FFX_UPSCALE_ENABLE_DEBUG_CHECKING (1 << 7)
+    // at create when on, so the runtime's warnings reach the log through fpMessage; never otherwise. Not FSR 3.1's bit 8, which
+    // is FSR 4's NON_LINEAR_COLORSPACE.
+    constexpr uint32_t kDebugChecking = 1u << 7;
+    if (!check(edvr::flatProfileReadsKey("advanced.fsr4_debug_checker"), "the flat profile reads advanced.fsr4_debug_checker") ||
+        !check(edvr::fsr4CreateFlags(false, false, kAutomatic, false, true) == (kInverted | kAuto | kNonLinear | kDebugChecking) &&
+               edvr::fsr4CreateFlags(true, true, kFixed, false, true) == (kHdr | kInverted | kInfinite | kDebugChecking) &&
+               edvr::fsr4CreateFlags(true, true, kAutomatic, true, true) ==
+                   (kHdr | kInverted | kInfinite | kAuto | kDebugVisualization | kDebugChecking),
+               "debug checker on: the create flags add DEBUG_CHECKING and nothing else, on every route") ||
+        !check(edvr::fsr4CreateFlags(false, false, kAutomatic, false, false) == (kInverted | kAuto | kNonLinear) &&
+               edvr::fsr4CreateFlags(true, true, kFixed, false, false) == (kHdr | kInverted | kInfinite) &&
+               edvr::fsr4CreateFlags(true, true, kFixed) == (kHdr | kInverted | kInfinite),
+               "debug checker off, the default: no DEBUG_CHECKING at create"))
         return false;
     return check(edvr::fsr4DispatchFlags(false, true) == ((1u << 1) | kDrawDebugView) &&
                  edvr::fsr4DispatchFlags(true, true) == kDrawDebugView &&

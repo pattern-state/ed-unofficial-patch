@@ -216,11 +216,14 @@ struct Fsr4ContextKey {
     bool debugView = false;
     // fsr4Exposure: AUTO_EXPOSURE is a create flag, so a change of profile or of advanced.fsr4_auto_exposure is a new key.
     Fsr4Exposure exposure = Fsr4Exposure::Automatic;
+    // advanced.fsr4_debug_checker: AMD's debug checking is a create flag as well.
+    bool debugChecker = false;
     uint32_t colourFormat = 0, depthFormat = 0, motionFormat = 0, outFormat = 0;
 
     bool operator==(const Fsr4ContextKey& o) const {
         return inW == o.inW && inH == o.inH && outW == o.outW && outH == o.outH &&
                infiniteDepth == o.infiniteDepth && hdr == o.hdr && debugView == o.debugView && exposure == o.exposure &&
+               debugChecker == o.debugChecker &&
                colourFormat == o.colourFormat && depthFormat == o.depthFormat &&
                motionFormat == o.motionFormat && outFormat == o.outFormat;
     }
@@ -327,17 +330,23 @@ constexpr uint32_t kFsr4FlagNonLinearColourspace = 1u << 8;   // FFX_UPSCALE_ENA
 constexpr uint32_t kFsr4DispatchNonLinearSrgb = 1u << 1;      // FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB
 constexpr uint32_t kFsr4FlagDebugVisualization = 1u << 9;     // FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION
 constexpr uint32_t kFsr4DispatchDrawDebugView = 1u << 0;      // FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW
+// FSR 4's own debug-checking bit. FSR 3.1's port puts its checker at bit 8 (kFsrFlagDebugChecking), which in FSR 4 is
+// NON_LINEAR_COLORSPACE, so fsr4CreateFlags never asks flatFsrCreateFlags for diagnostics.
+constexpr uint32_t kFsr4FlagDebugChecking = 1u << 7;          // FFX_UPSCALE_ENABLE_DEBUG_CHECKING
 
 // Creation flags: route 1's (reversed Z always, infinite depth when asked, the HDR bit on the HDR route; hdr_backend_flags.h)
-// with no AMD debug checking, and two of FSR 4's own: AUTO_EXPOSURE except where the exposure is fixed (fsr4Exposure, the flat
+// without its debug checking, and two of FSR 4's own: AUTO_EXPOSURE except where the exposure is fixed (fsr4Exposure, the flat
 // HDR route only), because AMD documents the exposure input as optional only when that flag is set (route 1 runs the LDR route
 // with neither, which FSR 3.1 accepts); and on the display-referred LDR route the non-linear colour space, which FSR 4 asks of
 // colour that is not linear. A fixed exposure is honoured only with hdr: the copy route always has AUTO_EXPOSURE.
 // debugView (advanced.fsr4_debug_view, a diagnostic) adds AMD's debug visualization, which the dispatch's DRAW_DEBUG_VIEW needs.
-inline constexpr uint32_t fsr4CreateFlags(bool infiniteDepth, bool hdr, Fsr4Exposure exposure, bool debugView = false) {
+// debugChecker (advanced.fsr4_debug_checker, a diagnostic) adds AMD's debug checker, whose warnings about the inputs (a very low
+// cameraFar with infinite inverted depth, a frame time not in milliseconds) reach the log through the context's fpMessage.
+inline constexpr uint32_t fsr4CreateFlags(bool infiniteDepth, bool hdr, Fsr4Exposure exposure, bool debugView = false,
+                                          bool debugChecker = false) {
     return (flatFsrCreateFlags(infiniteDepth, false, hdr) & ~kFsrFlagAutoExposure) |
            (hdr && exposure == Fsr4Exposure::Fixed ? 0u : kFsrFlagAutoExposure) | (hdr ? 0u : kFsr4FlagNonLinearColourspace) |
-           (debugView ? kFsr4FlagDebugVisualization : 0u);
+           (debugView ? kFsr4FlagDebugVisualization : 0u) | (debugChecker ? kFsr4FlagDebugChecking : 0u);
 }
 
 // AMD's contract (super-resolution-ml.md, Exposure): the 1x1 exposure input may be omitted only from a context created with

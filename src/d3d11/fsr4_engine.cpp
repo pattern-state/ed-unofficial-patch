@@ -7,7 +7,7 @@
 #include <cstring>
 #include <cwchar>
 
-#include "../common/config.h"   // advanced.fsr4_debug_view, advanced.fsr4_auto_exposure
+#include "../common/config.h"   // advanced.fsr4_debug_view, advanced.fsr4_auto_exposure, advanced.fsr4_debug_checker
 #include "../common/log.h"
 #include "../common/runtime_profile.h"   // runtimeFlatProfile: the flat HDR route's fixed exposure (fsr4Exposure)
 #include "dlaa.h"          // kUpscalerSlots: one FSR 4 context per upscaler slot
@@ -58,6 +58,7 @@ static_assert(kFsr4FlagNonLinearColourspace == static_cast<uint32_t>(FFX_UPSCALE
 static_assert(kFsr4DispatchNonLinearSrgb == static_cast<uint32_t>(FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB), "dispatch sRGB bit");
 static_assert(kFsr4FlagDebugVisualization == static_cast<uint32_t>(FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION), "debug visualization bit");
 static_assert(kFsr4DispatchDrawDebugView == static_cast<uint32_t>(FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW), "dispatch debug view bit");
+static_assert(kFsr4FlagDebugChecking == static_cast<uint32_t>(FFX_UPSCALE_ENABLE_DEBUG_CHECKING), "debug checking bit");
 #endif
 
 namespace {
@@ -848,7 +849,7 @@ bool makeContext(State& state, Feature& feature, const char** why) {
     feature.descs = std::make_unique<ContextDescs>();
     ContextDescs& d = *feature.descs;
     d.upscale.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    d.upscale.flags = fsr4CreateFlags(key.infiniteDepth, key.hdr, key.exposure, key.debugView);
+    d.upscale.flags = fsr4CreateFlags(key.infiniteDepth, key.hdr, key.exposure, key.debugView, key.debugChecker);
     d.upscale.maxRenderSize = FfxApiDimensions2D{key.inW, key.inH};
     d.upscale.maxUpscaleSize = FfxApiDimensions2D{key.outW, key.outH};
     d.upscale.fpMessage = &ffxMessage;
@@ -879,9 +880,9 @@ bool makeContext(State& state, Feature& feature, const char** why) {
     }
     feature.context = context;
     Log::get().note("fsr4: slot=%u context created in %.1f ms: in=%ux%u out=%ux%u flags=0x%X infinite=%u hdr=%u debug_view=%u "
-                    "exposure=%s", feature.slot, qpcSpanMs(began, ended), key.inW, key.inH, key.outW, key.outH,
+                    "exposure=%s debug_checker=%u", feature.slot, qpcSpanMs(began, ended), key.inW, key.inH, key.outW, key.outH,
                     unsigned(d.upscale.flags), key.infiniteDepth ? 1u : 0u, key.hdr ? 1u : 0u, key.debugView ? 1u : 0u,
-                    fsr4ExposureResourceRequired(d.upscale.flags) ? "fixed-1.0" : "auto");
+                    fsr4ExposureResourceRequired(d.upscale.flags) ? "fixed-1.0" : "auto", key.debugChecker ? 1u : 0u);
 
     // Which provider AMD actually bound. D7 belt and braces: the override above asked for a 4.x one; a context on anything older
     // is destroyed, never run in fsr4's name.
@@ -939,7 +940,7 @@ bool makeFeature(State& state, unsigned slot, const Fsr4ContextKey& key, const c
         !makeShared(state, slot, feature->depth, "depth", key.inW, key.inH, depthFormat, false, why) ||
         !makeShared(state, slot, feature->output, "output", key.outW, key.outH, outFormat, true, why))
         return false;
-    if (fsr4ExposureResourceRequired(fsr4CreateFlags(key.infiniteDepth, key.hdr, key.exposure, key.debugView)) &&
+    if (fsr4ExposureResourceRequired(fsr4CreateFlags(key.infiniteDepth, key.hdr, key.exposure, key.debugView, key.debugChecker)) &&
         !makeExposure(state, *feature, why))
         return false;
     state.slots[slot].d12Note[0] = '\0';
@@ -1337,6 +1338,8 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     // advanced.fsr4_auto_exposure, read live as the debug view is: a change is a new key, so the context is made again with or
     // without AUTO_EXPOSURE.
     key.exposure = fsr4Exposure(hdr, runtimeFlatProfile(), Config::get().getBool("advanced.fsr4_auto_exposure", false));
+    // advanced.fsr4_debug_checker, read live the same way: AMD's checker is a create flag.
+    key.debugChecker = Config::get().getBool("advanced.fsr4_debug_checker", false);
     key.colourFormat = static_cast<uint32_t>(colourPlan.typed);
     key.depthFormat = static_cast<uint32_t>(depthPlan.typed);
     key.motionFormat = static_cast<uint32_t>(motionPlan.typed);

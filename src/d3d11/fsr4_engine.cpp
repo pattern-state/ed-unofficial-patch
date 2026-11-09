@@ -1078,15 +1078,18 @@ bool probeRuntime(State& state, const char** why) {
         !loadProc(state.loaderModule, "ffxDispatch", api.dispatch))
         return failProbe(why, "amd_fidelityfx_loader_dx12.dll lacks a required ffx-api export");
 
-    // Ask AMD's runtime to route its errors into the log from here on, so a refusal inside it has its own words beside ours. Best
-    // effort: AMD's signed loader declines this context-less route (rc=2, measured), which changes nothing else, because every
-    // context's own messages still come through the create descriptor's fpMessage (makeContext).
-    ffxConfigureDescGlobalDebug1 debug{};
-    debug.header.type = FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1;
+    // Ask AMD's runtime to route its errors into the log from here on, so a refusal inside it has its own words beside ours. The
+    // type-7 descriptor (ffxConfigureDescGlobalDebug) names the effect, the upscaler; it replaces GlobalDebug1, which SDK 2.4
+    // deprecates. Best effort: the signed loader declined GlobalDebug1 on this context-less route (rc=2, measured), and a refusal
+    // changes nothing else, because every context's own messages still come through the create descriptor's fpMessage
+    // (makeContext).
+    ffxConfigureDescGlobalDebug debug{};
+    debug.header.type = FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG;
+    debug.effectId = FFX_API_EFFECT_ID_UPSCALE;
     debug.fpMessage = &ffxMessage;
     debug.debugLevel = FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_ERRORS;
     const ffxReturnCode_t configured = api.configure(nullptr, &debug.header);
-    Log::get().note("fsr4: context-less debug messages ffxConfigure rc=%u (2 = the signed loader declines it); "
+    Log::get().note("fsr4: context-less debug messages (GlobalDebug, upscale effect) ffxConfigure rc=%u (2 = the loader declines it); "
                     "per-context messages come through each context's message callback", unsigned(configured));
 
     // D7: which versions does AMD's runtime offer for this device? Only a 4.x one lets fsr4 run.

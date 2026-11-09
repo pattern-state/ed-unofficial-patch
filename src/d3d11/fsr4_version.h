@@ -1,6 +1,7 @@
 // The pure decisions behind fsr4_engine.cpp, with no AMD SDK, no device and no project .cpp, so tools\fsr4_engine_test can pin
 // them in its --self-test on a machine with no AMD GPU: which of the versions AMD's runtime offers FSR 4 may run (decision D7,
-// docs\fsr-upscaler-design-2026-09-16.md, "2026-10-23: route 2"), how a refusal reads, which texture formats the D3D12 side
+// docs\fsr-upscaler-design-2026-09-16.md, "2026-10-23: route 2") and which it prefers (D2, docs\design-fsr4-1-2-2026-11-07.md),
+// how the served version is labelled (D3) and shown in the F8 menu, how a refusal reads, which texture formats the D3D12 side
 // is given, the creation and dispatch flags, the camera planes and the frame time. Header-only, namespace edvr.
 //
 // D7: fsr4 runs only when AMD's runtime offers a 4.x provider for the device. It never runs an FSR 3.1.5 provider in fsr4's
@@ -73,14 +74,25 @@ inline int fsr4CompareVersions(const Fsr4Version& a, const Fsr4Version& b) {
     return 0;
 }
 
-// Index of the highest offered version whose major is at least 4, or -1 when AMD offers none (D7: then fsr4 refuses). Names that
-// are not versions are ignored; of two equal versions the first wins. picked, when given, receives the winner.
-inline int fsr4PickVersion(const std::vector<std::string>& names, Fsr4Version* picked = nullptr) {
+// The FSR 4 version fsr4 prefers (D2, amended 2026-11-08): the newest AMD has shipped, 4.1.2, picked by its exact version
+// whenever AMD's runtime offers it. A constant, not the version the SDK headers were built against, because the 4.x provider is
+// AMD's driver-side file (amdxcffx64.dll: Proton's serves 4.1.1, AMD's own driver 4.1.2), not the SDK's upscaler DLL.
+constexpr Fsr4Version kFsr4PreferredVersion{4, 1, 2};
+
+// Index of the version fsr4 runs, or -1 when AMD offers no 4.x (D7: then fsr4 refuses). preferred, when given and a 4.x, wins by
+// its exact version wherever it is in the list; otherwise the highest 4.x offered. Names that are not versions are ignored; of
+// two equal versions the first wins. picked, when given, receives the winner.
+inline int fsr4PickVersion(const std::vector<std::string>& names, Fsr4Version* picked = nullptr,
+                           const Fsr4Version* preferred = nullptr) {
     int best = -1;
     Fsr4Version bestVersion;
     for (size_t i = 0; i < names.size(); ++i) {
         Fsr4Version v;
         if (!fsr4ParseVersion(names[i].c_str(), &v) || v.major < 4) continue;
+        if (preferred && fsr4CompareVersions(v, *preferred) == 0) {
+            if (picked) *picked = v;
+            return static_cast<int>(i);
+        }
         if (best < 0 || fsr4CompareVersions(v, bestVersion) > 0) {
             best = static_cast<int>(i);
             bestVersion = v;
@@ -112,6 +124,53 @@ inline std::string fsr4FormatVersionList(const std::vector<std::string>& names) 
         }
     }
     return text;
+}
+
+// What the price line and the perf tile print for the provider a context reported (D3): "fsr 4.1.2" when it is the preferred
+// version, else the version and where it came from, "fsr 4.1.1 (driver provider)", "(Proton driver provider)" under Wine. It
+// never names a version that was not served.
+inline std::string fsr4ServedLabel(const Fsr4Version& served, const Fsr4Version& preferred, bool underWine) {
+    std::string text = "fsr " + fsr4FormatVersion(served);
+    if (fsr4CompareVersions(served, preferred) != 0) text += underWine ? " (Proton driver provider)" : " (driver provider)";
+    return text;
+}
+
+// ---- the F8 Anti-aliasing row ----
+
+// The session's FSR 4 provider as the F8 panel shows it. NotQueried until the first availability probe of the session (and again
+// after fsr4Shutdown); Served once a context has reported a 4.x provider, with the render and output sizes it was made for;
+// Unavailable when the probe refused, with its reason. fsr4_engine.cpp keeps one under a lock for the panel to copy.
+enum class Fsr4Offer : uint8_t { NotQueried, Served, Unavailable };
+
+struct Fsr4Served {
+    Fsr4Offer offer = Fsr4Offer::NotQueried;
+    Fsr4Version version;   // 0.0.0 for a provider accepted by its id whose name is not a version (fsr4ProviderIsFour)
+    uint32_t inW = 0, inH = 0, outW = 0, outH = 0;
+    char reason[512] = "";
+};
+
+// The row's choice text: "FSR 4" before the query, "FSR 4.1.2" or "FSR 4.1.1" once served, "FSR 4 (unavailable)" when the probe
+// refused. A served provider with no readable version says "FSR 4": never a point version that was not reported.
+inline std::string fsr4RowLabelFor(const Fsr4Served& s) {
+    if (s.offer == Fsr4Offer::Unavailable) return "FSR 4 (unavailable)";
+    if (s.offer == Fsr4Offer::Served && s.version.major >= 4) return "FSR " + fsr4FormatVersion(s.version);
+    return "FSR 4";
+}
+
+// The status line under the rows: the served version and render -> output size, or the refusal reason.
+inline std::string fsr4StatusLineFor(const Fsr4Served& s) {
+    char text[600];
+    switch (s.offer) {
+        case Fsr4Offer::Served:
+            std::snprintf(text, sizeof(text), "%s: %ux%u -> %ux%u", fsr4RowLabelFor(s).c_str(), s.inW, s.inH, s.outW, s.outH);
+            return text;
+        case Fsr4Offer::Unavailable:
+            std::snprintf(text, sizeof(text), "FSR 4 unavailable: %s", s.reason[0] ? s.reason : "no reason given");
+            return text;
+        case Fsr4Offer::NotQueried:
+            break;
+    }
+    return "FSR 4: AMD's runtime has not been asked yet";
 }
 
 // The refusal when AMD's runtime offers no 4.x provider (D7). underWine adds the Proton launch option: Valve's Wine routes the

@@ -584,7 +584,7 @@ double windowPercentile(double* v, int n, double frac) {
 
 // engine is only meaningful for FullFrame (None is always Own). AMD's run
 // prints fsr3VersionLabel() ("fsr", or "fsr 3.1.2" once the port is linked), and
-// FSR 4.1's fsr4VersionLabel() ("fsr4", or "fsr 4.1.1" once a context exists),
+// FSR 4.1's fsr4VersionLabel() ("fsr4", or "fsr 4.1.2" / "fsr 4.1.1 (Proton driver provider)" once a context exists),
 // in place of "full-frame ngx", which is NVIDIA's brand name, not AMD's.
 // lean is only meaningful for the own path: which of its two shaders ran.
 const char* treatmentName(Treatment t, edvr::TemporalEngine engine, bool lean) {

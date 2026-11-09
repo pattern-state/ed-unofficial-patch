@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "dlaa.h"   // kUpscalerSlots: slots 0 and 1 are the eyes', 2 the VR world route's; flat uses 0
 
@@ -54,9 +55,19 @@ void fsr4ReleaseFeatures();
 // has never run here. Safe when FSR 4 never started.
 void fsr4Shutdown();
 
-// "fsr 4.1.1" (the provider AMD's runtime reported for the last context made), or "fsr4" before one exists.
-// What the price line and the perf tile print for this engine.
+// "fsr 4.1.2", or "fsr 4.1.1 (Proton driver provider)" (fsr4ServedLabel: the provider AMD's runtime reported for
+// the last context made), or "fsr4" before one exists. What the price line and the perf tile print for this engine.
+// Render thread.
 const char* fsr4VersionLabel();
+
+// The F8 Anti-aliasing row's text for fsr4: "FSR 4" before the session's first provider query, "FSR 4.1.2" or
+// "FSR 4.1.1" once a context has reported its provider, "FSR 4 (unavailable)" when the probe refused (and always in
+// a build without the SDK). Any thread: a copy taken under the engine's lock.
+std::string fsr4RowLabel();
+
+// The F8 status line for fsr4: the served version and render -> output size ("FSR 4.1.2: 2560x1440 -> 3840x2160"),
+// or "FSR 4 unavailable: " and the refusal reason. Any thread, as fsr4RowLabel.
+std::string fsr4StatusLine();
 
 // The slot's measured price, as xessSlotTotals gives XeSS's: evaluations, resets, and the mean and maximum CPU
 // milliseconds per successful evaluate. False until the slot has evaluated, and in a build without the SDK.

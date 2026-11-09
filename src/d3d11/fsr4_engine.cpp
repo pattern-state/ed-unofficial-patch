@@ -60,7 +60,8 @@ namespace {
 
 constexpr size_t kReasonBytes = 512;
 
-// "fsr 4.1.1" once a context has reported its provider (fsr4VersionLabel); "fsr4" before. Plain storage, no static destructor.
+// "fsr 4.1.2", or "fsr 4.1.1 (Proton driver provider)", once a context has reported its provider (fsr4VersionLabel,
+// fsr4ServedLabel); "fsr4" before. Plain storage, no static destructor. Render thread, as its readers are.
 char g_label[40] = "fsr4";
 
 // One refusal line per distinct reason: the same text again is counted and said only every 600th time, so a refusal the caller
@@ -79,12 +80,21 @@ void logRefusal(const char* text) {
 }
 
 #if !EDVR_HAVE_FSR4
+constexpr const char* kNotBuiltReason = "this build was made without AMD's FSR 4 SDK (EDVR_HAVE_FSR4)";
+
 // Every entry of a build without AMD's SDK answers this, so the log says once that FSR 4 was asked for and is not there.
 bool failNotBuilt(const char** why) {
-    constexpr const char* reason = "this build was made without AMD's FSR 4 SDK (EDVR_HAVE_FSR4)";
-    if (why) *why = reason;
-    logRefusal(reason);
+    if (why) *why = kNotBuiltReason;
+    logRefusal(kNotBuiltReason);
     return false;
+}
+
+// The F8 row's view of a build without the SDK: unavailable from the start, for the same reason.
+Fsr4Served notBuiltServed() {
+    Fsr4Served s;
+    s.offer = Fsr4Offer::Unavailable;
+    std::snprintf(s.reason, sizeof(s.reason), "%s", kNotBuiltReason);
+    return s;
 }
 #endif
 
@@ -114,6 +124,26 @@ bool fail(const char** why, const char* format, ...) {
     return false;
 }
 
+// The session's provider as the F8 panel shows it (fsr4RowLabel, fsr4StatusLine). The render thread writes it at the probe, at a
+// context's provider query and at shutdown; the menu reads it from the frame thread, so both go through the lock and the reader
+// takes a copy. A slim lock and a constant-initialised struct: no static constructor or destructor.
+SRWLOCK g_servedLock = SRWLOCK_INIT;
+Fsr4Served g_served;
+
+void setServed(const Fsr4Served& next) {
+    AcquireSRWLockExclusive(&g_servedLock);
+    g_served = next;
+    ReleaseSRWLockExclusive(&g_servedLock);
+}
+
+Fsr4Served servedNow() {
+    AcquireSRWLockShared(&g_servedLock);
+    const Fsr4Served copy = g_served;
+    ReleaseSRWLockShared(&g_servedLock);
+    return copy;
+}
+
+// Every availability refusal leaves FSR 4 unavailable for the device it ran on, so the F8 row says so with the same reason.
 bool failProbe(const char** why, const char* format, ...) {
     va_list args;
     va_start(args, format);
@@ -122,6 +152,10 @@ bool failProbe(const char** why, const char* format, ...) {
     g_probeReason[sizeof(g_probeReason) - 1] = '\0';
     if (why) *why = g_probeReason;
     logRefusal(g_probeReason);
+    Fsr4Served unavailable;
+    unavailable.offer = Fsr4Offer::Unavailable;
+    std::snprintf(unavailable.reason, sizeof(unavailable.reason), "%s", g_probeReason);
+    setServed(unavailable);
     return false;
 }
 
@@ -284,8 +318,8 @@ struct State {
     HANDLE sharedFenceHandle = nullptr;
     HANDLE cpuEvent = nullptr;
     FfxApi api;
-    // The provider AMD's runtime was asked for: the highest 4.x it offers for this device (D7), as the id ffxOverrideVersion
-    // takes and the name it reported, copied out of AMD's memory at once.
+    // The provider AMD's runtime was asked for: 4.1.2 when offered, else the highest 4.x it offers for this device (D2, D7), as
+    // the id ffxOverrideVersion takes and the name it reported, copied out of AMD's memory at once.
     uint64_t versionId = 0;
     std::string versionName;
     // One counter for every slot: all slots signal the one shared fence in this order, so a wait on a slot's own value also
@@ -811,9 +845,20 @@ bool makeContext(State& state, Feature& feature, const char** why) {
         return fail(why, "AMD's runtime bound %s%s to the context, not a 4.x provider; fsr4 never runs an older one in its name",
                     name[0] ? "FSR " : "an unnamed provider", name);
     }
+    // D3: every label names the version AMD bound, never the one asked for or preferred.
     Fsr4Version provided;
-    if (fsr4ParseVersion(name, &provided)) std::snprintf(g_label, sizeof(g_label), "fsr %s", fsr4FormatVersion(provided).c_str());
+    const bool named = fsr4ParseVersion(name, &provided);
+    if (named)
+        std::snprintf(g_label, sizeof(g_label), "%s", fsr4ServedLabel(provided, kFsr4PreferredVersion, underWine()).c_str());
     else std::snprintf(g_label, sizeof(g_label), "fsr %s", name);
+    Fsr4Served served;
+    served.offer = Fsr4Offer::Served;
+    if (named) served.version = provided;
+    served.inW = key.inW;
+    served.inH = key.inH;
+    served.outW = key.outW;
+    served.outH = key.outH;
+    setServed(served);
 
     // Diagnostic only: which inputs this provider says it requires and which it takes if given (FfxApiQueryResourceIdentifiers:
     // colour 1, depth 2, motion 4, exposure 8, reactive 16, transparency 32). Route 1 gives exposure none and runs on AMD's
@@ -1049,15 +1094,18 @@ bool probeRuntime(State& state, const char** why) {
     Log::get().note("fsr4: AMD's runtime offers %s for this device (%u version%s)", offered.c_str(), unsigned(names.size()),
                     names.size() == 1 ? "" : "s");
     Fsr4Version picked;
-    const int pick = fsr4PickVersion(names, &picked);
+    const int pick = fsr4PickVersion(names, &picked, &kFsr4PreferredVersion);
     if (pick < 0) {
         const std::string text = fsr4RefusalText(names, underWine());
         return failProbe(why, "%s", text.c_str());
     }
     state.versionId = ids[static_cast<size_t>(pick)];
     state.versionName = names[static_cast<size_t>(pick)];
-    Log::get().note("fsr4: using AMD's provider %s (version id 0x%llX), the highest 4.x offered", fsr4FormatVersion(picked).c_str(),
-                    static_cast<unsigned long long>(state.versionId));
+    const std::string preferred = fsr4FormatVersion(kFsr4PreferredVersion);
+    const bool isPreferred = fsr4CompareVersions(picked, kFsr4PreferredVersion) == 0;
+    Log::get().note("fsr4: picked FSR %s, version id 0x%llX (preferred %s%s)", fsr4FormatVersion(picked).c_str(),
+                    static_cast<unsigned long long>(state.versionId), preferred.c_str(),
+                    isPreferred ? "" : " is not offered; this is the highest 4.x offered");
 
     D3D12_COMMAND_QUEUE_DESC queueDesc{};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1084,6 +1132,14 @@ bool probeRuntime(State& state, const char** why) {
 bool fsr4BuiltIn() { return EDVR_HAVE_FSR4 != 0; }
 
 const char* fsr4VersionLabel() { return g_label; }
+
+#if EDVR_HAVE_FSR4
+std::string fsr4RowLabel() { return fsr4RowLabelFor(servedNow()); }
+std::string fsr4StatusLine() { return fsr4StatusLineFor(servedNow()); }
+#else
+std::string fsr4RowLabel() { return fsr4RowLabelFor(notBuiltServed()); }
+std::string fsr4StatusLine() { return fsr4StatusLineFor(notBuiltServed()); }
+#endif
 
 bool fsr4Available(ID3D11Device* dev, const char** why) {
 #if !EDVR_HAVE_FSR4
@@ -1514,6 +1570,7 @@ void fsr4Shutdown() {
     g_available = false;
     g_fovFallbackNoted = false;   // a re-initialised session says it again
     std::snprintf(g_label, sizeof(g_label), "fsr4");
+    setServed(Fsr4Served{});      // the next probe is the session's first query again
 #endif
 }
 

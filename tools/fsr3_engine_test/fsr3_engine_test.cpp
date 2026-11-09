@@ -1870,6 +1870,10 @@ void testVramQuery(ID3D11Device* dev) {
 }
 
 int run() {
+    // The F8 Anti-aliasing row names the port's linked version, as fsr3VersionLabel does: 3.1.2 in the staged ffx_fsr3upscaler.h.
+    // No device needed, so it is checked before WARP.
+    check(std::strcmp(edvr::fsr3RowLabel(), "FSR 3.1.2") == 0, "the F8 row names the linked FSR 3.1.2");
+
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     if (!createWarpDevice(device, context)) {

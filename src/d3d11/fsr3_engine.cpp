@@ -1039,6 +1039,22 @@ const char* fsr3VersionLabel() {
 #endif
 }
 
+const char* fsr3RowLabel() {
+#if EDVR_HAVE_FSR3
+    // A function-local static is initialised once, thread-safely, and this one has no destructor to run at DLL detach.
+    struct Text { char value[32]; };
+    static const Text label = [] {
+        Text t{};
+        snprintf(t.value, sizeof(t.value), "FSR %d.%d.%d", FFX_FSR3UPSCALER_VERSION_MAJOR, FFX_FSR3UPSCALER_VERSION_MINOR,
+                 FFX_FSR3UPSCALER_VERSION_PATCH);
+        return t;
+    }();
+    return label.value;
+#else
+    return "FSR 3";
+#endif
+}
+
 bool fsr3Totals(uint32_t* evaluations, double* avgMs, double* maxMs, uint32_t* resets) {
     if (g_evaluations == 0) return false;
     if (evaluations) *evaluations = g_evaluations;

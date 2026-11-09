@@ -1,12 +1,14 @@
 // Rig for the FSR 4 engine (src\d3d11\fsr4_engine.cpp), modelled on tools\xess_engine_test. Three modes:
 //
 //   --dry-run                 prints the plan; no device, no file.
-//   --self-test               GPU-free. The pure decisions of fsr4_version.h (which version AMD's runtime may run as FSR 4,
-//                             the refusal text, the typed texture formats, the creation and dispatch flags, the camera
-//                             planes, the frame time, the failure latch), then the engine's entries with no GPU: a slot out
-//                             of range and a null device are refused without a crash, and a D3D11 device that supports
-//                             nothing fails the probe once and is remembered. In a build without AMD's SDK it checks the
-//                             other half: fsr4BuiltIn is false and every entry refuses by name.
+//   --self-test               GPU-free. The pure decisions of fsr4_version.h (which version AMD's runtime may run as FSR 4
+//                             and which it prefers, the served label, the F8 row label and status line, the refusal text,
+//                             the typed texture formats, the creation and dispatch flags, the camera planes, the frame
+//                             time, the failure latch), then the engine's entries with no GPU: a slot out of range and a
+//                             null device are refused without a crash, and a D3D11 device that supports nothing fails the
+//                             probe once, is remembered, and turns the F8 row to "FSR 4 (unavailable)" until shutdown. In a
+//                             build without AMD's SDK it checks the other half: fsr4BuiltIn is false, every entry refuses
+//                             by name, and the F8 row says FSR 4 is unavailable.
 //   --gpu-test-if-available   a hardware D3D11 device. fsr4Available true runs small LDR and HDR evaluations (128x128 to
 //                             192x192), checks the output is not all zero, and checks the release and re-create counts. A
 //                             clean refusal with a reason is a PASS and prints the reason: CI has no Radeon RX 7000 or 9000,
@@ -59,9 +61,10 @@ using Names = std::vector<std::string>;
 
 // ---- fsr4_version.h ----
 
-bool pickCase(const Names& names, int expectIndex, const char* expectVersion, const char* stage) {
+bool pickCase(const Names& names, int expectIndex, const char* expectVersion, const char* stage,
+              const edvr::Fsr4Version* preferred = nullptr) {
     edvr::Fsr4Version picked;
-    const int index = edvr::fsr4PickVersion(names, &picked);
+    const int index = edvr::fsr4PickVersion(names, &picked, preferred);
     if (!check(index == expectIndex, stage)) {
         std::fprintf(stderr, "fsr4_engine_test:   picked index %d, expected %d\n", index, expectIndex);
         return false;
@@ -102,6 +105,65 @@ bool versionSelfTest() {
         !pickCase({}, -1, "", "nothing offered: no pick"))
         return false;
     if (!check(edvr::fsr4PickVersion({"3.1.5"}) < 0, "pick without an output pointer")) return false;
+
+    // D2 as amended 2026-11-08: 4.1.2 by its exact version when offered, else the highest 4.x, else none. "4.1.1 *" is the name
+    // form AMD's runtime returned for 4.1.1 on Proton (ed-fsr4's probe, reset_renderer.h); the preferred version is written out
+    // as numbers here, not taken from kFsr4PreferredVersion, so the constant itself is pinned too.
+    const edvr::Fsr4Version v412{4, 1, 2};
+    if (!check(edvr::kFsr4PreferredVersion.major == 4 && edvr::kFsr4PreferredVersion.minor == 1 &&
+                   edvr::kFsr4PreferredVersion.patch == 2, "the preferred version is 4.1.2") ||
+        !pickCase({"3.1.5", "4.1.1", "4.1.2"}, 2, "4.1.2", "pick_prefers_exact_built_version", &v412) ||
+        !pickCase({"3.1.5", "4.1.1"}, 1, "4.1.1", "pick_falls_back_to_highest_four", &v412) ||
+        !pickCase({"4.1.2 *", "3.1.6", "2.3.4"}, 0, "4.1.2", "4.1.2 in AMD's starred name form is the preferred one", &v412) ||
+        !pickCase({"4.1.1 *", "3.1.6", "2.3.4"}, 0, "4.1.1", "Proton's 4.1.1 alone: the highest 4.x", &v412) ||
+        !pickCase({"4.2.0", "4.1.2"}, 1, "4.1.2", "the preferred version wins over a higher 4.x", &v412) ||
+        !pickCase({"4.2.0", "4.1.1"}, 0, "4.2.0", "no preferred version: the highest 4.x", &v412) ||
+        !pickCase({"3.1.5", "2.3.4"}, -1, "", "no 4.x with a preference: still no pick", &v412) ||
+        !pickCase({"4.1.2", "4.1.2"}, 0, "4.1.2", "the preferred version offered twice: the first", &v412) ||
+        !pickCase({"4.1.20", "4.1.1"}, 0, "4.1.20", "4.1.20 is not 4.1.2", &v412))
+        return false;
+    const edvr::Fsr4Version v3{3, 1, 5};
+    if (!check(edvr::fsr4PickVersion({"3.1.5", "4.1.1"}, nullptr, &v3) == 1,
+               "a preferred version below 4 is never picked over the D7 rule")) return false;
+
+    // D3: the label names the version served, and its source when it is not the preferred one.
+    const edvr::Fsr4Version v411{4, 1, 1};
+    if (!check(edvr::fsr4ServedLabel(v411, v412, true) == "fsr 4.1.1 (Proton driver provider)", "label_names_served_not_built") ||
+        !check(edvr::fsr4ServedLabel(v411, v412, false) == "fsr 4.1.1 (driver provider)",
+               "label_names_served_not_built, Windows") ||
+        !check(edvr::fsr4ServedLabel(v412, v412, true) == "fsr 4.1.2", "label_exact_when_served_equals_built") ||
+        !check(edvr::fsr4ServedLabel(v412, v412, false) == "fsr 4.1.2", "label_exact_when_served_equals_built, Windows") ||
+        !check(std::string(edvr::fsr4ServedLabel(v411, v412, true)).find("4.1.2") == std::string::npos,
+               "a 4.1.1 label never says 4.1.2"))
+        return false;
+
+    // The F8 Anti-aliasing row and status line, from the session's provider state (fsr4_engine.cpp keeps it).
+    edvr::Fsr4Served s;
+    if (!check(edvr::fsr4RowLabelFor(s) == "FSR 4", "row_label_before_query")) return false;
+    s.offer = edvr::Fsr4Offer::Served;
+    s.version = v412;
+    s.inW = 2560; s.inH = 1440; s.outW = 3840; s.outH = 2160;
+    if (!check(edvr::fsr4RowLabelFor(s) == "FSR 4.1.2", "row_label_served_4_1_2") ||
+        !check(edvr::fsr4StatusLineFor(s) == "FSR 4.1.2: 2560x1440 -> 3840x2160", "status line: served version and sizes"))
+        return false;
+    s.version = v411;
+    s.inW = 3840; s.inH = 1080; s.outW = 3840; s.outH = 1080;
+    if (!check(edvr::fsr4RowLabelFor(s) == "FSR 4.1.1", "row_label_served_4_1_1") ||
+        !check(edvr::fsr4StatusLineFor(s) == "FSR 4.1.1: 3840x1080 -> 3840x1080", "status line: native size"))
+        return false;
+    s.version = edvr::Fsr4Version{};   // a provider accepted by its id with a name that is not a version
+    if (!check(edvr::fsr4RowLabelFor(s) == "FSR 4", "a served provider with no readable version claims no point version"))
+        return false;
+    s = edvr::Fsr4Served{};
+    s.offer = edvr::Fsr4Offer::Unavailable;
+    const std::string refusal = edvr::fsr4RefusalText({"3.1.5", "2.3.4"}, true);
+    std::snprintf(s.reason, sizeof(s.reason), "%s", refusal.c_str());
+    if (!check(edvr::fsr4RowLabelFor(s) == "FSR 4 (unavailable)", "row_label_unavailable_when_no_4x") ||
+        !check(edvr::fsr4StatusLineFor(s) == "FSR 4 unavailable: " + refusal, "the status line carries the refusal reason"))
+        return false;
+    s = edvr::Fsr4Served{};
+    if (!check(edvr::fsr4StatusLineFor(s) == "FSR 4: AMD's runtime has not been asked yet", "status line before the query"))
+        return false;
 
     if (!check(edvr::fsr4FormatVersionList({"3.1.5", "4.1.1"}) == "3.1.5, 4.1.1", "list formatting") ||
         !check(edvr::fsr4FormatVersionList({"3.1.5"}) == "3.1.5", "one-item list formatting") ||
@@ -199,9 +261,9 @@ bool formatSelfTest() {
 
 // ---- flags ----
 
-// AMD's real bit values (FidelityFX SDK v2.3.0 ffx_upscale.h), written out as numbers: the engine static_asserts the same
-// constants against AMD's enum, so a drift in either side fails a build with the SDK, and this rig pins what the flags mean
-// in a build without it.
+// AMD's real bit values (FidelityFX SDK v2.4.0 ffx_upscale.h, unchanged from v2.3.0), written out as numbers: the engine
+// static_asserts the same constants against AMD's enum, so a drift in either side fails a build with the SDK, and this rig pins
+// what the flags mean in a build without it.
 bool flagsSelfTest() {
     constexpr uint32_t kHdr = 1u << 0, kInverted = 1u << 3, kInfinite = 1u << 4, kAuto = 1u << 5, kNonLinear = 1u << 8;
     if (!check(edvr::fsr4CreateFlags(false, false) == (kInverted | kAuto | kNonLinear),
@@ -254,6 +316,9 @@ bool notBuiltSelfTest() {
     why = nullptr;
     if (!check(!edvr::fsr4Evaluate(nullptr, 3, nullptr, nullptr, nullptr, nullptr, 1, 1, 1, 1, 0.0f, 0.0f, false, 0.0f, 0.0f, 0.0f,
                                    0.0f, &why) && why && std::strstr(why, "EDVR_HAVE_FSR4"), "fsr4Evaluate refuses a bad slot by name too")) return false;
+    if (!check(edvr::fsr4RowLabel() == "FSR 4 (unavailable)", "without the SDK the F8 row says FSR 4 is unavailable") ||
+        !check(edvr::fsr4StatusLine().find("EDVR_HAVE_FSR4") != std::string::npos, "without the SDK the status line says why"))
+        return false;
     uint32_t evaluations = 0, resets = 0;
     double avg = 0.0, max = 0.0;
     return check(!edvr::fsr4SlotTotals(0, &evaluations, &resets, &avg, &max) &&
@@ -298,12 +363,17 @@ bool failedProbeSelfTest() {
                "a device without shared fences fails the first probe")) return false;
     const char* firstWhy = why;
     if (!check(a.queries == 1 && a.refs == 2, "the failed probe asked the device once and holds a reference to it")) return false;
+    if (!check(edvr::fsr4RowLabel() == "FSR 4 (unavailable)", "a failed probe makes the F8 row FSR 4 (unavailable)") ||
+        !check(edvr::fsr4StatusLine() == std::string("FSR 4 unavailable: ") + firstWhy,
+               "the status line carries the probe's refusal"))
+        return false;
     if (!check(!edvr::fsr4Available(&a, &why) && a.queries == 1 && why == firstWhy,
                "the same device offered again is a cached failure, not a second probe")) return false;
     if (!check(!edvr::fsr4Available(&b, &why) && b.queries == 1,
                "a different device is probed afresh after a failed probe")) return false;
     if (!check(a.refs == 1 && b.refs == 2, "the retry released the first failed device and holds the second")) return false;
     edvr::fsr4Shutdown();
+    if (!check(edvr::fsr4RowLabel() == "FSR 4", "after shutdown the F8 row is FSR 4 again, before the next query")) return false;
     return check(b.refs == 1, "shutdown released the failed device");
 }
 
@@ -312,6 +382,9 @@ bool entriesSelfTest() {
     edvr::fsr4Shutdown();
     if (!check(std::strcmp(edvr::fsr4VersionLabel(), "fsr4") == 0, "the label is fsr4 before any context exists")) return false;
     if (!edvr::fsr4BuiltIn()) return notBuiltSelfTest();
+    if (!check(edvr::fsr4RowLabel() == "FSR 4", "the F8 row is FSR 4 before the session's first provider query") ||
+        !check(edvr::fsr4StatusLine() == "FSR 4: AMD's runtime has not been asked yet", "the status line before the first query"))
+        return false;
     uint32_t evaluations = 0, resets = 0;
     double avg = 0.0, max = 0.0;
     return slotRangeSelfTest() && nullDeviceSelfTest() && failedProbeSelfTest() &&
@@ -602,6 +675,8 @@ int gpuTest(bool optional) {
                 flight(device.Get(), context.Get(), typeless);
     // The provider label is what the price line prints: "fsr 4.x.y" once a context has reported its provider.
     good = good && check(std::strncmp(edvr::fsr4VersionLabel(), "fsr 4", 5) == 0, "the version label names the 4.x provider");
+    good = good && check(edvr::fsr4RowLabel().rfind("FSR 4.", 0) == 0, "once served the F8 row names the point version");
+    good = good && check(edvr::fsr4StatusLine().find(" -> ") != std::string::npos, "once served the status line gives the sizes");
     uint32_t evaluations = 0, resets = 0;
     double avg = 0.0, max = 0.0;
     good = good && check(edvr::fsr4SlotTotals(0, &evaluations, &resets, &avg, &max) && evaluations >= 5 && avg > 0.0 && max >= avg,
@@ -617,7 +692,8 @@ int gpuTest(bool optional) {
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
     if (std::strcmp(argv[1], "--dry-run") == 0) {
-        std::puts("fsr4_engine_test: plan -- --self-test: version pick (only 3.1.5 refuses; 3.1.5 and 4.1.1 picks 4.1.1; prefixed and garbage names), "
+        std::puts("fsr4_engine_test: plan -- --self-test: version pick (only 3.1.5 refuses; 3.1.5 and 4.1.1 picks 4.1.1; 4.1.2 preferred over a "
+                  "higher 4.x; prefixed and garbage names), served labels, the F8 row label and status line, "
                   "refusal text, typed formats, creation and dispatch flags, camera planes, frame time, failure latch, slot range, "
                   "null device, failed probe; --gpu-test-if-available: availability or a clean refusal, then LDR and HDR 128x128 -> 192x192 "
                   "with a nonzero-output readback, box copy, release and re-create counts. No file or device is created by --dry-run.");

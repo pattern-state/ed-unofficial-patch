@@ -108,6 +108,10 @@ bool fsr3BuiltIn();
 // when the engine that ran was AMD's (temporal_pass.cpp).
 const char* fsr3VersionLabel();
 
+// The F8 Anti-aliasing row's text for fsr, in the form of fsr4RowLabel (fsr4_engine.h): "FSR 3.1.2" once the port is linked;
+// the stub returns "FSR 3". A compile-time constant, so any thread may read it.
+const char* fsr3RowLabel();
+
 // The measured price, mirroring dlaaTotals(dlaa.h): evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the
 // reset. False when nothing has run -- always false in a build with no SDK,

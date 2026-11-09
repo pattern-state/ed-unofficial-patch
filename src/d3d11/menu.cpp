@@ -39,6 +39,8 @@
 #include "flat_elite_settings.h"
 #include "flat_runtime.h"
 #include "flat_wrapper_note.h"
+#include "fsr3_engine.h"        // fsr3RowLabel: the Anti-aliasing row's FSR 3 entry names the linked version
+#include "fsr4_engine.h"        // fsr4RowLabel, fsr4StatusLine: the FSR 4 entry names the version AMD serves, the hint why not
 #include "hotkey_capture.h"
 #include "input_gate.h"
 #include "joy_watch.h"
@@ -1039,13 +1041,17 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && c.value == "dlss") {
                 c.label = nvidiaLabel();
             }
+            // Both profiles: the FSR entries name their point versions (D3, D12). FSR 3 is the port's linked version; FSR 4 is
+            // "FSR 4" until the session's first provider query, then the version AMD serves, or "FSR 4 (unavailable)".
+            if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0) {
+                if (c.value == "fsr") c.label = fsr3RowLabel();
+                else if (c.value == "fsr4") c.label = fsr4RowLabel();
+            }
             if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
                 strcmp(d.key, "temporal_aa") == 0) {
                 if (c.value == "off") c.label = "Off";
                 else if (c.value == "on") c.label = "TAA";
                 else if (c.value == "dlss") c.label = nvidiaLabel();
-                else if (c.value == "fsr") c.label = "FSR3";
-                else if (c.value == "fsr4") c.label = "FSR4";
             }
             out.push_back(c);
         }
@@ -2627,6 +2633,13 @@ void buildContent(MenuContent& c) {
             if (hi && openxrScaleRow) {
                 snprintf(c.hint, sizeof(c.hint), "%s", openxrResolutionHint(res).c_str());
             }
+            // The Anti-aliasing row on FSR 4, highlighted: the F8 status line, the version served and render -> output size, or
+            // why FSR 4 is unavailable. The tooltip carries it whole; this box holds what fits.
+            const bool fsr4Selected = strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 &&
+                                      _stricmp(r.value.c_str(), "fsr4") == 0;
+            if (hi && fsr4Selected) {
+                snprintf(c.hint, sizeof(c.hint), "%s", fsr4StatusLine().c_str());
+            }
             if (hi && isVscreenResolutionRow(d)) {
                 // announce=false: this runs every frame the row is highlighted,
                 // not once at startup, so the resolver must stay silent here.
@@ -2660,6 +2673,7 @@ void buildContent(MenuContent& c) {
                 // to change a value needs -- its range, its shipped value,
                 // when it applies, and which key does it.
                 std::string body;
+                if (fsr4Selected) body += fsr4StatusLine() + ".\n";
                 if (openxrScaleRow) {
                     body += openxrResolutionFacts();
                 } else if (isVscreenResolutionRow(d) && d.lo[0] && d.hi[0]) {

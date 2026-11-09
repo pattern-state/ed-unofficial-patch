@@ -74,7 +74,7 @@ inline int fsr4CompareVersions(const Fsr4Version& a, const Fsr4Version& b) {
     return 0;
 }
 
-// The FSR 4 version fsr4 prefers (D2, amended 2026-11-08): the newest AMD has shipped, 4.1.2, picked by its exact version
+// The FSR 4 version fsr4 prefers (decided 2026-11-08): the newest AMD has shipped, 4.1.2, picked by its exact version
 // whenever AMD's runtime offers it. A constant, not the version the SDK headers were built against, because the 4.x provider is
 // AMD's driver-side file (amdxcffx64.dll: Proton's serves 4.1.1, AMD's own driver 4.1.2), not the SDK's upscaler DLL.
 constexpr Fsr4Version kFsr4PreferredVersion{4, 1, 2};
@@ -126,7 +126,7 @@ inline std::string fsr4FormatVersionList(const std::vector<std::string>& names) 
     return text;
 }
 
-// What the price line and the perf tile print for the provider a context reported (D3): "fsr 4.1.2" when it is the preferred
+// What the price line and the perf tile print for the provider a context reported: "fsr 4.1.2" when it is the preferred
 // version, else the version and where it came from, "fsr 4.1.1 (driver provider)", "(Proton driver provider)" under Wine. It
 // never names a version that was not served.
 inline std::string fsr4ServedLabel(const Fsr4Version& served, const Fsr4Version& preferred, bool underWine) {

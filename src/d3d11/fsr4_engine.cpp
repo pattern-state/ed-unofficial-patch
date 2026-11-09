@@ -321,8 +321,8 @@ struct State {
     HANDLE sharedFenceHandle = nullptr;
     HANDLE cpuEvent = nullptr;
     FfxApi api;
-    // The provider AMD's runtime was asked for: 4.1.2 when offered, else the highest 4.x it offers for this device (D2, D7), as
-    // the id ffxOverrideVersion takes and the name it reported, copied out of AMD's memory at once.
+    // The provider AMD's runtime was asked for: 4.1.2 when offered, else the highest 4.x it offers for this device
+    // (kFsr4PreferredVersion; D7), as the id ffxOverrideVersion takes and the name it reported, copied out of AMD's memory at once.
     uint64_t versionId = 0;
     std::string versionName;
     // One counter for every slot: all slots signal the one shared fence in this order, so a wait on a slot's own value also
@@ -848,7 +848,7 @@ bool makeContext(State& state, Feature& feature, const char** why) {
         return fail(why, "AMD's runtime bound %s%s to the context, not a 4.x provider; fsr4 never runs an older one in its name",
                     name[0] ? "FSR " : "an unnamed provider", name);
     }
-    // D3: every label names the version AMD bound, never the one asked for or preferred.
+    // Every label (the price line, the perf tile, the F8 row) names the version AMD bound, never the one asked for or preferred.
     Fsr4Version provided;
     const bool named = fsr4ParseVersion(name, &provided);
     if (named)

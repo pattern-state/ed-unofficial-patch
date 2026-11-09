@@ -110,9 +110,9 @@ bool versionSelfTest() {
         return false;
     if (!check(edvr::fsr4PickVersion({"3.1.5"}) < 0, "pick without an output pointer")) return false;
 
-    // D2 as amended 2026-11-08: 4.1.2 by its exact version when offered, else the highest 4.x, else none. "4.1.1 *" is the name
-    // form AMD's runtime returned for 4.1.1 on Proton (ed-fsr4's probe, reset_renderer.h); the preferred version is written out
-    // as numbers here, not taken from kFsr4PreferredVersion, so the constant itself is pinned too.
+    // The preferred version (decided 2026-11-08): 4.1.2 by its exact version when offered, else the highest 4.x, else none.
+    // "4.1.1 *" is the name form AMD's runtime returned for 4.1.1 on Proton (ed-fsr4's probe, reset_renderer.h); the preferred
+    // version is written out as numbers here, not taken from kFsr4PreferredVersion, so the constant itself is pinned too.
     const edvr::Fsr4Version v412{4, 1, 2};
     if (!check(edvr::kFsr4PreferredVersion.major == 4 && edvr::kFsr4PreferredVersion.minor == 1 &&
                    edvr::kFsr4PreferredVersion.patch == 2, "the preferred version is 4.1.2") ||
@@ -130,7 +130,7 @@ bool versionSelfTest() {
     if (!check(edvr::fsr4PickVersion({"3.1.5", "4.1.1"}, nullptr, &v3) == 1,
                "a preferred version below 4 is never picked over the D7 rule")) return false;
 
-    // D3: the label names the version served, and its source when it is not the preferred one.
+    // The served label names the version served, and its source when it is not the preferred one: never one that was not served.
     const edvr::Fsr4Version v411{4, 1, 1};
     if (!check(edvr::fsr4ServedLabel(v411, v412, true) == "fsr 4.1.1 (Proton driver provider)", "label_names_served_not_built") ||
         !check(edvr::fsr4ServedLabel(v411, v412, false) == "fsr 4.1.1 (driver provider)",

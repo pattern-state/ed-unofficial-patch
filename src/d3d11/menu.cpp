@@ -1060,8 +1060,9 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 && c.value == "dlss") {
                 c.label = nvidiaLabel();
             }
-            // Both profiles: the FSR entries name their point versions (D3, D12). FSR 3 is the port's linked version; FSR 4 is
-            // "FSR 4" until the session's first provider query, then the version AMD serves, or "FSR 4 (unavailable)".
+            // Both profiles: the FSR entries name their point versions, never one that is not running. FSR 3 is the port's
+            // linked version; FSR 4 is "FSR 4" until the session's first provider query, then the version AMD serves, or
+            // "FSR 4 (unavailable)".
             if (strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0) {
                 if (c.value == "fsr") c.label = fsr3RowLabel();
                 else if (c.value == "fsr4") c.label = fsr4RowLabel();

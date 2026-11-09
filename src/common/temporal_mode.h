@@ -6,6 +6,8 @@
 #include <cmath>
 #include <string>
 
+#include "temporal_math.h"   // temporalEyeJitterCycle: temporalXessJitterPhases, kTemporalJitterCount
+
 namespace edvr {
 
 // Every temporal mode needs the same depth and rigid-object motion inputs.
@@ -275,6 +277,18 @@ inline bool temporalExternalEngine(const std::string& mode) {
 
 inline bool temporalExternalEngineFor(const std::string& mode, bool flatProfile) {
     return temporalEngineForProfile(mode, flatProfile) != TemporalEngine::Own;
+}
+
+// The VR jitter's cycle for one eye that renders w x h toward the runtime's recommended recW x recH. Every engine keeps
+// the fixed eight except XeSS-SR (Intel) and FSR 4 (AmdFsr4), which take ceil(8 x scale^2) phases for the ratio the eye
+// pass upscales by (temporalXessJitterPhases): Intel's minimum, and the figure AMD's FSR 4 jitter table asks for. FSR 3.1
+// (Amd) keeps eight. An eye the pass does not upscale (within 2% of the recommendation on either axis, the pass's own test
+// in native_temporal.cpp treat()), or an unknown size, takes eight.
+inline uint32_t temporalEyeJitterCycle(TemporalEngine engine, uint32_t w, uint32_t h, uint32_t recW, uint32_t recH) {
+    if ((engine != TemporalEngine::Intel && engine != TemporalEngine::AmdFsr4) || !w || !h || !recW || !recH)
+        return kTemporalJitterCount;
+    if (!(w * 50 < recW * 49 && h * 50 < recH * 49)) return kTemporalJitterCount;
+    return temporalXessJitterPhases(kTemporalJitterCount, w, h, recW, recH);
 }
 
 // A display name only: automatic NVIDIA mode remains "dlss" in the ini.

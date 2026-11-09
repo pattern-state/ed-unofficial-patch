@@ -4573,21 +4573,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         const int asked=Config::get().getInt("advanced.temporal_aa_jitter_phases",8);
         bool usable=false;
         const uint32_t configured=temporalJitterPhases(asked,&usable);
-        uint32_t phases=configured;
-        uint32_t xessMinimum=kTemporalJitterCount;
-        if(s.engine==FlatMonoResolveMode::Xess && s.haveResolvePlan) {
-            const auto& plan=s.plannedResolve;
-            const auto route=flatResolveRoute(plan.mode,plan.renderWidth,plan.renderHeight,
-                                              plan.outputWidth,plan.outputHeight);
-            if(!route.refused) {
-                const uint32_t evalW=plan.evalWidth&&plan.evalHeight?plan.evalWidth:route.evalWidth;
-                const uint32_t evalH=plan.evalWidth&&plan.evalHeight?plan.evalHeight:route.evalHeight;
-                xessMinimum=temporalXessJitterPhases(kTemporalJitterCount,
-                    plan.renderWidth,plan.renderHeight,evalW,evalH);
-                phases=temporalXessJitterPhases(configured,
-                    plan.renderWidth,plan.renderHeight,evalW,evalH);
-            }
-        }
+        // A plan is cleared on every mode change (above), so a plan held here is always s.engine's.
+        const auto& plan=s.plannedResolve;
+        const FlatJitterCycle cycle=flatJitterCycle(s.engine,configured,s.haveResolvePlan,
+            plan.renderWidth,plan.renderHeight,plan.outputWidth,plan.outputHeight,plan.evalWidth,plan.evalHeight);
+        const uint32_t phases=cycle.phases;
+        const uint32_t ratioMinimum=cycle.ratioMinimum;
         if(!usable) {
             if(!s.jitterPhasesBadSaid || s.jitterPhasesBad!=asked) {
                 s.jitterPhasesBadSaid=true;s.jitterPhasesBad=asked;
@@ -4602,7 +4593,12 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
                 phases,s.jitterPhases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
             if(s.engine==FlatMonoResolveMode::Xess)
                 Log::get().note("flat jitter: XeSS-SR minimum=%u configured=%u effective=%u camera=%s actual=%u",
-                    xessMinimum,configured,phases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
+                    ratioMinimum,configured,phases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases));
+            // FSR 4 takes AMD's ceil(8 x ratio^2) on the Upstream camera route only; Legacy and Off keep 8 (flatCameraPhaseCount).
+            if(s.engine==FlatMonoResolveMode::Fsr4)
+                Log::get().note("flat jitter: FSR 4 ratio minimum=%u configured=%u effective=%u camera=%s actual=%u (%s)",
+                    ratioMinimum,configured,phases,flatCameraRouteName(route),flatCameraPhaseCount(route,phases),
+                    route==FlatCameraRoute::Upstream?"the ratio cycle applies":"this camera route keeps 8: the ratio cycle waits for the upstream route");
             s.phase.resetHistory();reset();
             s.jitterPhases=phases;
         }

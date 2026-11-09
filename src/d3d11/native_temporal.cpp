@@ -81,7 +81,7 @@ struct State {
   uint32_t width[2]{}, height[2]{};
   uint32_t recW=0,recH=0; bool flipped[2]{};
   uint32_t frameCounter = 0;
-  // The jitter cycle each eye last advertised (jitterCycleFor): 8 for every engine but Intel's XeSS, whose ratio sets it.
+  // The jitter cycle each eye last advertised (jitterCycleFor): 8 for every engine but XeSS and FSR 4, whose ratio sets it.
   uint32_t jitterCycle[2]{};
   bool treated[2]{};
   History history[2];
@@ -395,16 +395,15 @@ bool layerOnlyTreat(State& s,uint64_t seq,unsigned eye,uint32_t outW,uint32_t ou
   return true;
 }
 
-// The VR jitter's cycle for one eye. Every engine keeps the fixed eight except XeSS, which needs ceil(8 x scale^2) phases
-// for the ratio treat() upscales by (temporal_math.h). An eye that treat() does not upscale takes eight.
+// The VR jitter's cycle for one eye: the policy is temporal_mode.h temporalEyeJitterCycle (the engine and the ratio
+// treat() upscales by). A cycle other than the fixed eight is said in the log when it changes.
 uint32_t jitterCycleFor(State& s,unsigned eye) {
   const uint32_t w=s.width[eye],h=s.height[eye];
-  if(s.currentSettings.engine!=edvr::TemporalEngine::Intel||!w||!h||!s.recW||!s.recH) return edvr::kTemporalJitterCount;
-  if(!(w*50<s.recW*49&&h*50<s.recH*49)) return edvr::kTemporalJitterCount;
-  const uint32_t cycle=edvr::temporalXessJitterPhases(edvr::kTemporalJitterCount,w,h,s.recW,s.recH);
+  const uint32_t cycle=edvr::temporalEyeJitterCycle(s.currentSettings.engine,w,h,s.recW,s.recH);
+  if(cycle==edvr::kTemporalJitterCount) return cycle;
   if(cycle!=s.jitterCycle[eye]) {
     s.jitterCycle[eye]=cycle;
-    edvr::Log::get().note("temporal aa: xess jitter cycle %u phases (scale %.2f)",cycle,std::max(double(s.recW)/w,double(s.recH)/h));
+    edvr::Log::get().note("temporal aa: %s jitter cycle %u phases (scale %.2f)",mode(s.currentSettings),cycle,std::max(double(s.recW)/w,double(s.recH)/h));
   }
   return cycle;
 }

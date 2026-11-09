@@ -1,6 +1,7 @@
 #pragma once
 #include "engine_velocity.h"
 #include "flat_mono_refusal.h"
+#include "../common/temporal_math.h"   // flatJitterCycle: temporalXessJitterPhases, kTemporalJitterCount
 #include <dxgiformat.h>
 #include <cstdint>
 
@@ -88,6 +89,37 @@ inline FlatResolveRoute flatResolveRoute(FlatMonoResolveMode mode,
     }
     out.evalWidth = dW; out.evalHeight = dH; out.refused = false;
     out.name = smaller ? "trained-upscale" : "trained-native";
+    return out;
+}
+// The flat jitter cycle an engine runs, from the count
+// advanced.temporal_aa_jitter_phases gives (`configured`, already read through
+// temporalJitterPhases) and the planned resolve's sizes: R (rW x rH), D
+// (dW x dH) and the negotiated E, zero when none was negotiated. XeSS-SR and
+// FSR 4 take at least ceil(8 x ratio^2) phases for the ratio they upscale R to
+// E by (temporalXessJitterPhases): Intel's minimum, and the figure AMD's FSR 4
+// jitter table asks for (super-resolution-ml.md: 32 at 2x, 18 at 1.5x). Every
+// other engine runs the configured count; FSR 3.1 has the same AMD guidance
+// and keeps the configured count until that is decided for it on its own.
+// No plan, or a refused route, runs the configured count. ratioMinimum is the
+// engine's own minimum at this ratio, for the log; the fixed eight for an
+// engine with none. The camera route then bounds the count
+// (flat_camera_phase.h flatCameraPhaseCount).
+struct FlatJitterCycle {
+    uint32_t phases = kTemporalJitterCount;
+    uint32_t ratioMinimum = kTemporalJitterCount;
+};
+inline FlatJitterCycle flatJitterCycle(FlatMonoResolveMode mode, uint32_t configured, bool planned,
+                                       uint32_t rW, uint32_t rH, uint32_t dW, uint32_t dH,
+                                       uint32_t negotiatedW, uint32_t negotiatedH) {
+    FlatJitterCycle out;
+    out.phases = configured;
+    if ((mode != FlatMonoResolveMode::Xess && mode != FlatMonoResolveMode::Fsr4) || !planned) return out;
+    const auto route = flatResolveRoute(mode, rW, rH, dW, dH);
+    if (route.refused) return out;
+    const uint32_t eW = negotiatedW && negotiatedH ? negotiatedW : route.evalWidth;
+    const uint32_t eH = negotiatedW && negotiatedH ? negotiatedH : route.evalHeight;
+    out.ratioMinimum = temporalXessJitterPhases(kTemporalJitterCount, rW, rH, eW, eH);
+    out.phases = temporalXessJitterPhases(configured, rW, rH, eW, eH);
     return out;
 }
 struct FlatMonoResolveFrame {

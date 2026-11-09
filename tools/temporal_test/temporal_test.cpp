@@ -323,6 +323,36 @@ int main() {
         check(temporalXessJitterPhases(17, 0, 540, 1920, 1080) == 17 &&
               temporalXessJitterPhases(17, 960, 540, 0, 1080) == 17,
               "XeSS jitter: invalid dimensions retain the configured count");
+        // AMD's FSR 4 jitter table asks for the same ceil(8 x ratio^2): 2x 32, 1.5x 18, 4/3x 15, 1.0x the configured count.
+        check(temporalXessJitterPhases(8, 2560, 720, 5120, 1440) == 32, "ratio jitter: 2560x720 -> 5120x1440 (2x) needs 32");
+        check(temporalXessJitterPhases(8, 3840, 1080, 5120, 1440) == 15, "ratio jitter: 3840x1080 -> 5120x1440 (4/3x) needs 15");
+        check(temporalXessJitterPhases(8, 2560, 1440, 3840, 2160) == 18, "ratio jitter: 2560x1440 -> 3840x2160 (1.5x) needs 18");
+        check(temporalXessJitterPhases(8, 5120, 1440, 5120, 1440) == 8 &&
+              temporalXessJitterPhases(24, 5120, 1440, 5120, 1440) == 24, "ratio jitter: 1.0x keeps the configured count");
+    }
+    {
+        // The VR eye's cycle by engine (temporal_mode.h temporalEyeJitterCycle). FSR 4 is its own engine in VR:
+        // "fsr4" reads as AmdFsr4, "fsr" as Amd (FSR 3.1), and native_temporal.cpp sets the pass's kTemporalFlagFsr4
+        // (bit 9) from AmdFsr4 alone. Eyes of 1440x1584 and 1920x2112 toward 2880x3168 upscale by 2x and 1.5x.
+        using edvr::TemporalEngine;
+        using edvr::temporalEyeJitterCycle;
+        check(edvr::temporalEngineFor("fsr4") == TemporalEngine::AmdFsr4 && edvr::temporalEngineFor("fsr") == TemporalEngine::Amd,
+              "VR jitter: fsr4 and fsr are separate engines");
+        check(temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 1440, 1584, 2880, 3168) == 32 &&
+              temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 1920, 2112, 2880, 3168) == 18,
+              "VR jitter: an FSR 4 eye that upscales 2x runs 32, 1.5x runs 18");
+        check(temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 2880, 3168, 2880, 3168) == 8 &&
+              temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 2860, 3150, 2880, 3168) == 8 &&
+              temporalEyeJitterCycle(TemporalEngine::AmdFsr4, 0, 3168, 2880, 3168) == 8,
+              "VR jitter: an FSR 4 eye the pass does not upscale (native, within 2%, unknown size) runs 8");
+        check(temporalEyeJitterCycle(TemporalEngine::Amd, 1440, 1584, 2880, 3168) == 8,
+              "VR jitter: an FSR 3.1 eye that upscales 2x keeps 8");
+        check(temporalEyeJitterCycle(TemporalEngine::Nvidia, 1440, 1584, 2880, 3168) == 8 &&
+              temporalEyeJitterCycle(TemporalEngine::Own, 1440, 1584, 2880, 3168) == 8,
+              "VR jitter: DLSS and the pass's own history keep 8");
+        check(temporalEyeJitterCycle(TemporalEngine::Intel, 1440, 1584, 2880, 3168) == 32 &&
+              temporalEyeJitterCycle(TemporalEngine::Intel, 2880, 3168, 2880, 3168) == 8,
+              "VR jitter: an XeSS eye at 2x runs 32, at native 8");
     }
 
     // ---- The jitter as a tangent shift: the sign, pinned. -----------------

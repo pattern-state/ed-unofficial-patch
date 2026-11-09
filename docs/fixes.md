@@ -79,7 +79,9 @@ Anti-aliasing row of the Performance page, or set `fix.temporal_aa`:
   newest FSR 4 it does, and the Anti-aliasing row names the version in use,
   for example "FSR 4.1.1". Where FSR 4 is not offered the row reads "FSR 4
   (unavailable)", its hint and the log say why, and the frame falls back as
-  for any refusal; choose `fsr` instead. VR runs it once per eye.
+  for any refusal; choose `fsr` instead. VR runs it once per eye. At a low
+  Supersampling, set UI quality to `150` or `200`: the HUD is drawn at display
+  size after the upscale, so it stays sharp whatever the scene renders at.
 - `xess` is Intel's XeSS-SR. It runs on any GPU and is fastest on an Intel Arc
   card. Elsewhere it costs more than DLSS or FSR: on an RTX 5090 in VR it took
   about 1.2 ms a frame more than DLSS. It needs Intel's runtime, `libxess.dll`,

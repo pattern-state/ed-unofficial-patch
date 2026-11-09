@@ -1,7 +1,7 @@
 // The pure decisions behind fsr4_engine.cpp, with no AMD SDK, no device and no project .cpp, so tools\fsr4_engine_test can pin
 // them in its --self-test on a machine with no AMD GPU: which of the versions AMD's runtime offers FSR 4 may run (decision D7,
-// docs\fsr-upscaler-design-2026-09-16.md, "2026-10-23: route 2") and which it prefers (D2, docs\design-fsr4-1-2-2026-11-07.md),
-// how the served version is labelled (D3) and shown in the F8 menu, how a refusal reads, which texture formats the D3D12 side
+// docs\fsr-upscaler-design-2026-09-16.md, "2026-10-23: route 2") and which it prefers (4.1.2, else the newest 4.x; docs\investigation-fsr4-2026-11-08.md),
+// how the served version is labelled and shown in the F8 menu, how a refusal reads, which texture formats the D3D12 side
 // is given, the creation and dispatch flags, the camera planes and the frame time. Header-only, namespace edvr.
 //
 // D7: fsr4 runs only when AMD's runtime offers a 4.x provider for the device. It never runs an FSR 3.1.5 provider in fsr4's

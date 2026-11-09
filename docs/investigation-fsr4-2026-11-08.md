@@ -1,4 +1,8 @@
-# FSR 4.1.2 delivery journal (2026-11-08)
+# FSR 4 investigation (2026-11-08)
+
+Flights and provider findings for FSR 4 as this branch ships it: 4.1.1 on Proton.
+The FSR 4.1.2 design, plan and later findings (Proton-CachyOS, ML frame generation)
+are on branch `fsr4-1-2` of `pattern-state/ed-unofficial-patch`.
 
 ## Status
 
@@ -22,7 +26,8 @@
   F8 row text truncates ("FSR 4 (unavai..."), the status line overflows its box, and the
   footer's "saved" overlaps the version string when the describe string is long ("-dirty").
 - **Not flown:** VR; Windows; the 4.1.2 re-pin (Phase 1).
-- Design: `docs/design-fsr4-1-2-2026-11-07.md`. Plan: `.agents/plan-fsr4-1-2-2026-11-07.md`.
+- Design and plan: branch `fsr4-1-2`, `docs/design-fsr4-1-2-2026-11-07.md` and
+  `.agents/plan-fsr4-1-2-2026-11-07.md`.
 
 ## Rig
 

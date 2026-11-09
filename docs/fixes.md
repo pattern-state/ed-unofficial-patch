@@ -71,6 +71,15 @@ Anti-aliasing row of the Performance page, or set `fix.temporal_aa`:
 - `fsr` is AMD's FidelityFX Super Resolution 3.1, through a community Direct3D
   11 port compiled into `d3d11.dll`. It runs on any GPU and needs no extra
   file.
+- `fsr4` is AMD's FSR 4, its machine-learning upscaler, through AMD's own
+  Direct3D 12 runtime: `amd_fidelityfx_loader_dx12.dll` and
+  `amd_fidelityfx_upscaler_dx12.dll` from FidelityFX SDK 2.4, beside the game
+  with AMD's licence. It runs where AMD's runtime offers FSR 4: the Radeon
+  RX 9000 series. It uses FSR 4.1.2 when the runtime offers it, otherwise the
+  newest FSR 4 it does, and the Anti-aliasing row names the version in use,
+  for example "FSR 4.1.1". Where FSR 4 is not offered the row reads "FSR 4
+  (unavailable)", its hint and the log say why, and the frame falls back as
+  for any refusal; choose `fsr` instead. VR runs it once per eye.
 - `xess` is Intel's XeSS-SR. It runs on any GPU and is fastest on an Intel Arc
   card. Elsewhere it costs more than DLSS or FSR: on an RTX 5090 in VR it took
   about 1.2 ms a frame more than DLSS. It needs Intel's runtime, `libxess.dll`,
@@ -79,6 +88,10 @@ Anti-aliasing row of the Performance page, or set `fix.temporal_aa`:
 
 The default is `off`, and a change takes effect at the next frame. Set Elite's
 own anti-aliasing to Off or SMAA while one of these is on.
+
+On Linux, Proton offers FSR 4 only with the launch option
+`FSR4_UPGRADE=1 %command%`. Proton Experimental then serves FSR 4.1.1 from its
+own copy of AMD's driver file.
 
 In VR the render size is set by Elite's HMD Image Quality. Below 1.0 the game
 renders smaller and the upscaler brings the picture back to the headset's size,

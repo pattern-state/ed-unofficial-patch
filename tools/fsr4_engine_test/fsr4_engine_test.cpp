@@ -290,9 +290,9 @@ bool flagsSelfTest() {
     // Exposure. The flat profile's HDR route evaluates pre-tonemap radiance the game exposes later, so it takes a fixed exposure of
     // 1.0 and no AUTO_EXPOSURE, as DLSS does there (hdr_backend_flags.h). The copy route and the VR world route (HDR, VR profile)
     // keep automatic exposure, as DLSS's VR world route does.
-    if (!check(edvr::fsr4Exposure(true, true) == kFixed, "flat HDR route: fixed exposure") ||
-        !check(edvr::fsr4Exposure(true, false) == kAutomatic, "VR world route (HDR, VR profile): automatic exposure, as DLSS") ||
-        !check(edvr::fsr4Exposure(false, true) == kAutomatic && edvr::fsr4Exposure(false, false) == kAutomatic,
+    if (!check(edvr::fsr4Exposure(true, true, false) == kFixed, "flat HDR route: fixed exposure") ||
+        !check(edvr::fsr4Exposure(true, false, false) == kAutomatic, "VR world route (HDR, VR profile): automatic exposure, as DLSS") ||
+        !check(edvr::fsr4Exposure(false, true, false) == kAutomatic && edvr::fsr4Exposure(false, false, false) == kAutomatic,
                "copy route: automatic exposure in both profiles"))
         return false;
     if (!check(edvr::fsr4CreateFlags(false, true, kFixed) == (kHdr | kInverted),
@@ -305,13 +305,26 @@ bool flagsSelfTest() {
         return false;
     // AMD's contract (super-resolution-ml.md, Exposure; ffx_upscale.h): the 1x1 exposure input may be omitted only when the context
     // has AUTO_EXPOSURE. The dispatch passes one exactly when the creation flags say it must.
-    if (!check(edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, true))),
+    if (!check(edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, true, false))),
                "flat HDR route: the dispatch requires an exposure resource") ||
-        !check(!edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, false))),
+        !check(!edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, false, false))),
                "VR world route: no exposure resource") ||
-        !check(!edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, false, edvr::fsr4Exposure(false, true))) &&
-               !edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(false, false, edvr::fsr4Exposure(false, false))),
+        !check(!edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, false, edvr::fsr4Exposure(false, true, false))) &&
+               !edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(false, false, edvr::fsr4Exposure(false, false, false))),
                "copy route: no exposure resource"))
+        return false;
+    // advanced.fsr4_auto_exposure (a diagnostic, off by default): on puts the flat HDR route back on AMD's automatic exposure, with
+    // no exposure input, so one session can A/B the two. The flat profile reads the key; the other routes do not change with it.
+    if (!check(edvr::flatProfileReadsKey("advanced.fsr4_auto_exposure"), "the flat profile reads advanced.fsr4_auto_exposure") ||
+        !check(edvr::fsr4Exposure(true, true, true) == kAutomatic, "auto exposure key on: the flat HDR route is automatic") ||
+        !check(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, true, true)) == (kHdr | kInverted | kInfinite | kAuto) &&
+               !edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, true, true))),
+               "auto exposure key on: the flat HDR route's flags are 0x39 again, with no exposure resource") ||
+        !check(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, true, false)) == (kHdr | kInverted | kInfinite),
+               "auto exposure key off: the flat HDR route has no AUTO_EXPOSURE") ||
+        !check(edvr::fsr4Exposure(true, false, true) == kAutomatic && edvr::fsr4Exposure(false, true, true) == kAutomatic &&
+               edvr::fsr4Exposure(false, false, true) == kAutomatic,
+               "auto exposure key on: the VR world and copy routes stay automatic"))
         return false;
     if (!check(edvr::fsr4DispatchFlags(false) == (1u << 1) && edvr::fsr4DispatchFlags(true) == 0u,
                "dispatch declares LDR colour sRGB and leaves HDR alone"))

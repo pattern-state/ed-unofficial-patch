@@ -7,7 +7,7 @@
 #include <cstring>
 #include <cwchar>
 
-#include "../common/config.h"   // advanced.fsr4_debug_view
+#include "../common/config.h"   // advanced.fsr4_debug_view, advanced.fsr4_auto_exposure
 #include "../common/log.h"
 #include "../common/runtime_profile.h"   // runtimeFlatProfile: the flat HDR route's fixed exposure (fsr4Exposure)
 #include "dlaa.h"          // kUpscalerSlots: one FSR 4 context per upscaler slot
@@ -1334,7 +1334,9 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     // advanced.fsr4_debug_view, read live in both profiles: a change is a new key, so the slot's context is made again with or
     // without AMD's debug visualization.
     key.debugView = Config::get().getBool("advanced.fsr4_debug_view", false);
-    key.exposure = fsr4Exposure(hdr, runtimeFlatProfile());
+    // advanced.fsr4_auto_exposure, read live as the debug view is: a change is a new key, so the context is made again with or
+    // without AUTO_EXPOSURE.
+    key.exposure = fsr4Exposure(hdr, runtimeFlatProfile(), Config::get().getBool("advanced.fsr4_auto_exposure", false));
     key.colourFormat = static_cast<uint32_t>(colourPlan.typed);
     key.depthFormat = static_cast<uint32_t>(depthPlan.typed);
     key.motionFormat = static_cast<uint32_t>(motionPlan.typed);

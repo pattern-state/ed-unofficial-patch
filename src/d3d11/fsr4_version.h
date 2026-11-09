@@ -200,10 +200,11 @@ inline bool fsr4ProviderIsFour(const char* name, uint64_t providerId, uint64_t r
 // fsr4_engine.cpp) and no AUTO_EXPOSURE. AMD's automatic exposure averages log luminance, and an ED space frame is near-black
 // with point stars; NVIDIA's did the same and dimmed the picture and lost stars (flown 2026-10-09). The VR world route, the
 // other caller with HDR colour, keeps automatic exposure as DLSS's does: flatProfile false. The display-referred copy route
-// keeps it too.
+// keeps it too. autoExposureKey (advanced.fsr4_auto_exposure, a diagnostic) puts the flat HDR route back on automatic exposure,
+// so a flight can A/B the two in one session.
 enum class Fsr4Exposure { Automatic, Fixed };
-inline constexpr Fsr4Exposure fsr4Exposure(bool hdr, bool flatProfile) {
-    return hdr && flatProfile ? Fsr4Exposure::Fixed : Fsr4Exposure::Automatic;
+inline constexpr Fsr4Exposure fsr4Exposure(bool hdr, bool flatProfile, bool autoExposureKey) {
+    return hdr && flatProfile && !autoExposureKey ? Fsr4Exposure::Fixed : Fsr4Exposure::Automatic;
 }
 
 // Everything a context and its shared textures are made for. A change remakes both. The formats are the typed ones the shared
@@ -213,7 +214,7 @@ struct Fsr4ContextKey {
     bool infiniteDepth = false, hdr = false;
     // advanced.fsr4_debug_view: AMD's debug visualization is a create flag, so turning the view on or off remakes the context.
     bool debugView = false;
-    // fsr4Exposure: AUTO_EXPOSURE is a create flag, so a change of profile is a new key.
+    // fsr4Exposure: AUTO_EXPOSURE is a create flag, so a change of profile or of advanced.fsr4_auto_exposure is a new key.
     Fsr4Exposure exposure = Fsr4Exposure::Automatic;
     uint32_t colourFormat = 0, depthFormat = 0, motionFormat = 0, outFormat = 0;
 

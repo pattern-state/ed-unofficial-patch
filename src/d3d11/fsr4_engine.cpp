@@ -9,6 +9,7 @@
 
 #include "../common/config.h"   // advanced.fsr4_debug_view
 #include "../common/log.h"
+#include "../common/runtime_profile.h"   // runtimeFlatProfile: the flat HDR route's fixed exposure (fsr4Exposure)
 #include "dlaa.h"          // kUpscalerSlots: one FSR 4 context per upscaler slot
 #include "fsr4_version.h"  // the pure decisions: version pick, refusal text, formats, flags, camera planes
 
@@ -272,6 +273,13 @@ struct Feature {
     ffxContext context = nullptr;
     std::unique_ptr<ContextDescs> descs;
     SharedTexture color, motion, depth, output;
+    // The fixed exposure (fsr4Exposure; null where the context has AUTO_EXPOSURE): a 1x1 R32_FLOAT holding 1.0. Only the D3D12
+    // side reads it, so it is D3D12's own resource, not a shared texture, and costs no copy per frame. The upload buffer holds the
+    // value at exposureFootprint; the context's first submitted command list copies it in and leaves the texture in
+    // NON_PIXEL_SHADER_RESOURCE for the context's life. The buffer lives as long as the texture, so it is never freed under the copy.
+    ComPtr<ID3D12Resource> exposure, exposureUpload;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT exposureFootprint{};
+    bool exposureReady = false;   // set once a list holding the copy has been submitted
     std::array<CommandSlot, kCommandRing> commands;
     unsigned nextCommand = 0;
     uint64_t lastUseValue = 0;
@@ -791,6 +799,48 @@ void makeTiming(State& state, FeatureSlot& holder, CommandSlot& command) {
     command.ticks = static_cast<const uint64_t*>(mapped);
 }
 
+// The fixed exposure's texture and its upload buffer (Feature::exposure). The value is written now; the copy is recorded at the
+// context's first dispatch.
+bool makeExposure(State& state, Feature& feature, const char** why) {
+    D3D12_HEAP_PROPERTIES defaultHeap{};
+    defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 1;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    HRESULT hr = state.d12->CreateCommittedResource(&defaultHeap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                    nullptr, IID_PPV_ARGS(feature.exposure.GetAddressOf()));
+    if (FAILED(hr)) return fail(why, "D3D12 exposure texture (1x1 R32_FLOAT) failed 0x%08X", unsigned(hr));
+    UINT64 uploadBytes = 0;
+    state.d12->GetCopyableFootprints(&desc, 0, 1, 0, &feature.exposureFootprint, nullptr, nullptr, &uploadBytes);
+    D3D12_HEAP_PROPERTIES uploadHeap{};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC uploadDesc{};
+    uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width = uploadBytes;
+    uploadDesc.Height = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels = 1;
+    uploadDesc.SampleDesc.Count = 1;
+    uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    hr = state.d12->CreateCommittedResource(&uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                            nullptr, IID_PPV_ARGS(feature.exposureUpload.GetAddressOf()));
+    if (FAILED(hr)) return fail(why, "D3D12 exposure upload buffer failed 0x%08X", unsigned(hr));
+    const D3D12_RANGE noRead{0, 0};
+    void* mapped = nullptr;
+    hr = feature.exposureUpload->Map(0, &noRead, &mapped);
+    if (FAILED(hr) || !mapped) return fail(why, "D3D12 exposure upload map failed 0x%08X", unsigned(hr));
+    const float one = 1.0f;
+    std::memcpy(static_cast<unsigned char*>(mapped) + feature.exposureFootprint.Offset, &one, sizeof(one));
+    feature.exposureUpload->Unmap(0, nullptr);
+    return true;
+}
+
 // The ffx context for a feature whose shared textures and command ring already stand. The last step of makeFeature, so the one
 // thing that can fail after it (a provider below 4.x) destroys the context itself.
 bool makeContext(State& state, Feature& feature, const char** why) {
@@ -798,7 +848,7 @@ bool makeContext(State& state, Feature& feature, const char** why) {
     feature.descs = std::make_unique<ContextDescs>();
     ContextDescs& d = *feature.descs;
     d.upscale.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    d.upscale.flags = fsr4CreateFlags(key.infiniteDepth, key.hdr, key.debugView);
+    d.upscale.flags = fsr4CreateFlags(key.infiniteDepth, key.hdr, key.exposure, key.debugView);
     d.upscale.maxRenderSize = FfxApiDimensions2D{key.inW, key.inH};
     d.upscale.maxUpscaleSize = FfxApiDimensions2D{key.outW, key.outH};
     d.upscale.fpMessage = &ffxMessage;
@@ -828,9 +878,10 @@ bool makeContext(State& state, Feature& feature, const char** why) {
                     unsigned(d.upscale.flags));
     }
     feature.context = context;
-    Log::get().note("fsr4: slot=%u context created in %.1f ms: in=%ux%u out=%ux%u flags=0x%X infinite=%u hdr=%u debug_view=%u",
-                    feature.slot, qpcSpanMs(began, ended), key.inW, key.inH, key.outW, key.outH,
-                    unsigned(d.upscale.flags), key.infiniteDepth ? 1u : 0u, key.hdr ? 1u : 0u, key.debugView ? 1u : 0u);
+    Log::get().note("fsr4: slot=%u context created in %.1f ms: in=%ux%u out=%ux%u flags=0x%X infinite=%u hdr=%u debug_view=%u "
+                    "exposure=%s", feature.slot, qpcSpanMs(began, ended), key.inW, key.inH, key.outW, key.outH,
+                    unsigned(d.upscale.flags), key.infiniteDepth ? 1u : 0u, key.hdr ? 1u : 0u, key.debugView ? 1u : 0u,
+                    fsr4ExposureResourceRequired(d.upscale.flags) ? "fixed-1.0" : "auto");
 
     // Which provider AMD actually bound. D7 belt and braces: the override above asked for a 4.x one; a context on anything older
     // is destroyed, never run in fsr4's name.
@@ -864,8 +915,8 @@ bool makeContext(State& state, Feature& feature, const char** why) {
     setServed(served);
 
     // Diagnostic only: which inputs this provider says it requires and which it takes if given (FfxApiQueryResourceIdentifiers:
-    // colour 1, depth 2, motion 4, exposure 8, reactive 16, transparency 32). Route 1 gives exposure none and runs on AMD's
-    // default; if this provider requires one, the first dispatch refuses and this line says why.
+    // colour 1, depth 2, motion 4, exposure 8, reactive 16, transparency 32). The exposure is the fixed texture where the context
+    // lacks AUTO_EXPOSURE, else none; if this provider requires something else, the first dispatch refuses and this line says why.
     ffxQueryDescUpscaleGetResourceRequirements requirements{};
     requirements.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GET_RESOURCE_REQUIREMENTS;
     const ffxReturnCode_t required = state.api.query(&feature.context, &requirements.header);
@@ -887,6 +938,9 @@ bool makeFeature(State& state, unsigned slot, const Fsr4ContextKey& key, const c
         !makeShared(state, slot, feature->motion, "motion", key.inW, key.inH, motionFormat, false, why) ||
         !makeShared(state, slot, feature->depth, "depth", key.inW, key.inH, depthFormat, false, why) ||
         !makeShared(state, slot, feature->output, "output", key.outW, key.outH, outFormat, true, why))
+        return false;
+    if (fsr4ExposureResourceRequired(fsr4CreateFlags(key.infiniteDepth, key.hdr, key.exposure, key.debugView)) &&
+        !makeExposure(state, *feature, why))
         return false;
     state.slots[slot].d12Note[0] = '\0';
     for (CommandSlot& command : feature->commands) {
@@ -1280,6 +1334,7 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     // advanced.fsr4_debug_view, read live in both profiles: a change is a new key, so the slot's context is made again with or
     // without AMD's debug visualization.
     key.debugView = Config::get().getBool("advanced.fsr4_debug_view", false);
+    key.exposure = fsr4Exposure(hdr, runtimeFlatProfile());
     key.colourFormat = static_cast<uint32_t>(colourPlan.typed);
     key.depthFormat = static_cast<uint32_t>(depthPlan.typed);
     key.motionFormat = static_cast<uint32_t>(motionPlan.typed);
@@ -1383,6 +1438,21 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     transition(list, feature.output.d12.Get(), D3D12_RESOURCE_STATE_COMMON,
                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    // The fixed exposure's one copy (Feature::exposure), in the context's first submitted list. A list closed unsubmitted leaves
+    // exposureReady false and the texture still in COPY_DEST, so the next one records it again.
+    const bool fixedExposure = fsr4ExposureResourceRequired(feature.descs->upscale.flags);
+    if (fixedExposure && !feature.exposureReady) {
+        D3D12_TEXTURE_COPY_LOCATION target{};
+        target.pResource = feature.exposure.Get();
+        target.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        target.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = feature.exposureUpload.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint = feature.exposureFootprint;
+        list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+        transition(list, feature.exposure.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
 
     ffxDispatchDescUpscale dispatch{};
     dispatch.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
@@ -1390,8 +1460,11 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     dispatch.color = ffxApiGetResourceDX12(feature.color.d12.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dispatch.depth = ffxApiGetResourceDX12(feature.depth.d12.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dispatch.motionVectors = ffxApiGetResourceDX12(feature.motion.d12.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    // exposure, reactive and transparencyAndComposition stay empty, as route 1 leaves them: preExposure is 1, both routes have
-    // AMD's automatic exposure (fsr4CreateFlags), and EDVR has no reactive or transparency mask in this pass.
+    // exposure is the fixed 1.0 texture where the context lacks AUTO_EXPOSURE (the flat HDR route, fsr4Exposure) and empty
+    // elsewhere, where AMD computes it. preExposure is 1 on every route. reactive and transparencyAndComposition stay empty, as
+    // route 1 leaves them: EDVR has no reactive or transparency mask in this pass.
+    if (fixedExposure)
+        dispatch.exposure = ffxApiGetResourceDX12(feature.exposure.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
     // The UAV usage is stated rather than left to the helper, which derives it from the opened resource's own flags: a shared
     // resource opened through vkd3d-proton is not known to carry ALLOW_UNORDERED_ACCESS (makeShared logs what it does carry).
     dispatch.output = ffxApiGetResourceDX12(feature.output.d12.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -1462,6 +1535,7 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     LARGE_INTEGER submitBegan{}, submitEnded{};
     QueryPerformanceCounter(&submitBegan);
     state.queue->ExecuteCommandLists(1, lists);
+    if (fixedExposure) feature.exposureReady = true;
     command.timingPending = command.timingHeap.Get() != nullptr;
     const uint64_t done = ++state.nextFenceValue;
     hr = state.queue->Signal(state.fence12.Get(), done);

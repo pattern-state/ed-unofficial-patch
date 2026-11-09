@@ -195,6 +195,17 @@ inline bool fsr4ProviderIsFour(const char* name, uint64_t providerId, uint64_t r
 
 // ---- the context key and its failure latch ----
 
+// Exposure, as DLSS takes it (hdr_backend_flags.h, flatDlssCreateFlags). The flat profile's HDR route evaluates pre-tonemap
+// radiance that the game's own tone pass exposes later, so FSR 4 gets a fixed exposure of 1.0 (a 1x1 R32_FLOAT texture,
+// fsr4_engine.cpp) and no AUTO_EXPOSURE. AMD's automatic exposure averages log luminance, and an ED space frame is near-black
+// with point stars; NVIDIA's did the same and dimmed the picture and lost stars (flown 2026-10-09). The VR world route, the
+// other caller with HDR colour, keeps automatic exposure as DLSS's does: flatProfile false. The display-referred copy route
+// keeps it too.
+enum class Fsr4Exposure { Automatic, Fixed };
+inline constexpr Fsr4Exposure fsr4Exposure(bool hdr, bool flatProfile) {
+    return hdr && flatProfile ? Fsr4Exposure::Fixed : Fsr4Exposure::Automatic;
+}
+
 // Everything a context and its shared textures are made for. A change remakes both. The formats are the typed ones the shared
 // textures take (fsr4TypedFormat), stored as numbers so this header needs no device.
 struct Fsr4ContextKey {
@@ -202,11 +213,13 @@ struct Fsr4ContextKey {
     bool infiniteDepth = false, hdr = false;
     // advanced.fsr4_debug_view: AMD's debug visualization is a create flag, so turning the view on or off remakes the context.
     bool debugView = false;
+    // fsr4Exposure: AUTO_EXPOSURE is a create flag, so a change of profile is a new key.
+    Fsr4Exposure exposure = Fsr4Exposure::Automatic;
     uint32_t colourFormat = 0, depthFormat = 0, motionFormat = 0, outFormat = 0;
 
     bool operator==(const Fsr4ContextKey& o) const {
         return inW == o.inW && inH == o.inH && outW == o.outW && outH == o.outH &&
-               infiniteDepth == o.infiniteDepth && hdr == o.hdr && debugView == o.debugView &&
+               infiniteDepth == o.infiniteDepth && hdr == o.hdr && debugView == o.debugView && exposure == o.exposure &&
                colourFormat == o.colourFormat && depthFormat == o.depthFormat &&
                motionFormat == o.motionFormat && outFormat == o.outFormat;
     }
@@ -315,14 +328,20 @@ constexpr uint32_t kFsr4FlagDebugVisualization = 1u << 9;     // FFX_UPSCALE_ENA
 constexpr uint32_t kFsr4DispatchDrawDebugView = 1u << 0;      // FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW
 
 // Creation flags: route 1's (reversed Z always, infinite depth when asked, the HDR bit on the HDR route; hdr_backend_flags.h)
-// with no AMD debug checking, and two of FSR 4's own: automatic exposure on both routes, because AMD documents the exposure
-// input as optional only when that flag is set and recommends it (route 1 runs the LDR route with neither, which FSR 3.1
-// accepts); and on the display-referred LDR route the non-linear colour space, which FSR 4 asks of colour that is not linear.
+// with no AMD debug checking, and two of FSR 4's own: AUTO_EXPOSURE except where the exposure is fixed (fsr4Exposure, the flat
+// HDR route only), because AMD documents the exposure input as optional only when that flag is set (route 1 runs the LDR route
+// with neither, which FSR 3.1 accepts); and on the display-referred LDR route the non-linear colour space, which FSR 4 asks of
+// colour that is not linear. A fixed exposure is honoured only with hdr: the copy route always has AUTO_EXPOSURE.
 // debugView (advanced.fsr4_debug_view, a diagnostic) adds AMD's debug visualization, which the dispatch's DRAW_DEBUG_VIEW needs.
-inline constexpr uint32_t fsr4CreateFlags(bool infiniteDepth, bool hdr, bool debugView = false) {
-    return flatFsrCreateFlags(infiniteDepth, false, hdr) | kFsrFlagAutoExposure | (hdr ? 0u : kFsr4FlagNonLinearColourspace) |
+inline constexpr uint32_t fsr4CreateFlags(bool infiniteDepth, bool hdr, Fsr4Exposure exposure, bool debugView = false) {
+    return (flatFsrCreateFlags(infiniteDepth, false, hdr) & ~kFsrFlagAutoExposure) |
+           (hdr && exposure == Fsr4Exposure::Fixed ? 0u : kFsrFlagAutoExposure) | (hdr ? 0u : kFsr4FlagNonLinearColourspace) |
            (debugView ? kFsr4FlagDebugVisualization : 0u);
 }
+
+// AMD's contract (super-resolution-ml.md, Exposure): the 1x1 exposure input may be omitted only from a context created with
+// AUTO_EXPOSURE. The dispatch passes the bridge's exposure texture exactly when this is true of the context's creation flags.
+inline constexpr bool fsr4ExposureResourceRequired(uint32_t createFlags) { return (createFlags & kFsrFlagAutoExposure) == 0; }
 
 // Dispatch flags: LDR colour is declared sRGB; HDR scene radiance is linear and needs none. debugView draws AMD's debug view
 // (motion vectors, blend factor and the rest of AMD's panels) into the output in place of the picture, as FSR 3.1's

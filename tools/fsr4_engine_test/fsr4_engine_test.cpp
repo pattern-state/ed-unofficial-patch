@@ -9,8 +9,8 @@
 //                             probe once, is remembered, and turns the F8 row to "FSR 4 (unavailable)" until shutdown. In a
 //                             build without AMD's SDK it checks the other half: fsr4BuiltIn is false, every entry refuses
 //                             by name, and the F8 row says FSR 4 is unavailable.
-//   --gpu-test-if-available   a hardware D3D11 device. fsr4Available true runs small LDR and HDR evaluations (128x128 to
-//                             192x192), checks the output is not all zero, and checks the release and re-create counts. A
+//   --gpu-test-if-available   a hardware D3D11 device. fsr4Available true runs small LDR, HDR and flat-profile HDR (fixed
+//                             exposure) evaluations (128x128 to 192x192), checks the output is not all zero, and checks the release and re-create counts. A
 //                             clean refusal with a reason is a PASS and prints the reason: CI has no Radeon RX 7000 or 9000,
 //                             where AMD's runtime offers only FSR 3.1.5 and fsr4 refuses by design (decision D7). Absent
 //                             hardware skips. --gpu-test is the strict form: the device must exist and fsr4 must run.
@@ -34,6 +34,7 @@
 
 #include "../../src/common/config.h"
 #include "../../src/common/log.h"
+#include "../../src/common/runtime_profile.h"   // the flat HDR flight sets the flat profile: its fixed exposure
 #include "../../src/d3d11/fsr4_engine.h"
 #include "../../src/d3d11/fsr4_version.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
@@ -213,20 +214,23 @@ bool latchSelfTest() {
                "failed key keeps its precise reason")) return false;
     latch.clearIfDifferent(original);
     if (!check(latch.matches(original), "same key stays failed without retry")) return false;
-    edvr::Fsr4ContextKey changes[11] = {original, original, original, original, original,
+    edvr::Fsr4ContextKey changes[12] = {original, original, original, original, original, original,
                                         original, original, original, original, original, original};
     ++changes[0].inW; ++changes[1].inH; ++changes[2].outW; ++changes[3].outH;
     changes[4].infiniteDepth = true; changes[5].hdr = true;
     ++changes[6].colourFormat; ++changes[7].depthFormat; ++changes[8].motionFormat; ++changes[9].outFormat;
     changes[10].debugView = true;
+    changes[11].exposure = edvr::Fsr4Exposure::Fixed;
     for (const auto& changed : changes) {
         latch.record(original, "unavailable");
         latch.clearIfDifferent(changed);
         if (!check(!latch.matches(original) && !latch.matches(changed),
-                   "a size, depth, HDR, format or debug view change clears the failed key")) return false;
+                   "a size, depth, HDR, format, debug view or exposure change clears the failed key")) return false;
     }
     // The debug view's create bit is in the key: turning it on or off is a new key, so the context is made again.
     if (!check(!(original == changes[10]), "the debug view is part of the context key")) return false;
+    // So is the exposure: AUTO_EXPOSURE is a create flag, and a profile switch between the flat and VR HDR routes is a new key.
+    if (!check(!(original == changes[11]), "the exposure is part of the context key")) return false;
     latch.record(original, "shared texture failed");
     latch.clear();
     if (!check(!latch.matches(original), "a mode reset clears the failed key")) return false;
@@ -272,12 +276,42 @@ bool formatSelfTest() {
 // static_asserts the same constants against AMD's enum, so a drift in either side fails a build with the SDK, and this rig pins
 // what the flags mean in a build without it.
 bool flagsSelfTest() {
+    using edvr::Fsr4Exposure;
     constexpr uint32_t kHdr = 1u << 0, kInverted = 1u << 3, kInfinite = 1u << 4, kAuto = 1u << 5, kNonLinear = 1u << 8;
-    if (!check(edvr::fsr4CreateFlags(false, false) == (kInverted | kAuto | kNonLinear),
+    constexpr Fsr4Exposure kAutomatic = Fsr4Exposure::Automatic, kFixed = Fsr4Exposure::Fixed;
+    if (!check(edvr::fsr4CreateFlags(false, false, kAutomatic) == (kInverted | kAuto | kNonLinear),
                "LDR creation flags: reversed Z, automatic exposure and non-linear colour") ||
-        !check(edvr::fsr4CreateFlags(true, false) == (kInverted | kInfinite | kAuto | kNonLinear), "LDR infinite depth adds the infinite bit") ||
-        !check(edvr::fsr4CreateFlags(false, true) == (kHdr | kInverted | kAuto), "HDR creation flags: HDR, reversed Z, automatic exposure, no non-linear bit") ||
-        !check(edvr::fsr4CreateFlags(true, true) == (kHdr | kInverted | kInfinite | kAuto), "HDR infinite depth"))
+        !check(edvr::fsr4CreateFlags(true, false, kAutomatic) == (kInverted | kInfinite | kAuto | kNonLinear),
+               "LDR infinite depth adds the infinite bit") ||
+        !check(edvr::fsr4CreateFlags(false, true, kAutomatic) == (kHdr | kInverted | kAuto),
+               "HDR creation flags with automatic exposure: HDR, reversed Z, AUTO_EXPOSURE, no non-linear bit") ||
+        !check(edvr::fsr4CreateFlags(true, true, kAutomatic) == (kHdr | kInverted | kInfinite | kAuto), "HDR infinite depth"))
+        return false;
+    // Exposure. The flat profile's HDR route evaluates pre-tonemap radiance the game exposes later, so it takes a fixed exposure of
+    // 1.0 and no AUTO_EXPOSURE, as DLSS does there (hdr_backend_flags.h). The copy route and the VR world route (HDR, VR profile)
+    // keep automatic exposure, as DLSS's VR world route does.
+    if (!check(edvr::fsr4Exposure(true, true) == kFixed, "flat HDR route: fixed exposure") ||
+        !check(edvr::fsr4Exposure(true, false) == kAutomatic, "VR world route (HDR, VR profile): automatic exposure, as DLSS") ||
+        !check(edvr::fsr4Exposure(false, true) == kAutomatic && edvr::fsr4Exposure(false, false) == kAutomatic,
+               "copy route: automatic exposure in both profiles"))
+        return false;
+    if (!check(edvr::fsr4CreateFlags(false, true, kFixed) == (kHdr | kInverted),
+               "flat HDR route creation flags: HDR and reversed Z, no AUTO_EXPOSURE (0x9 where they were 0x29)") ||
+        !check(edvr::fsr4CreateFlags(true, true, kFixed) == (kHdr | kInverted | kInfinite),
+               "flat HDR route with infinite depth: 0x19 where it was 0x39") ||
+        !check(edvr::fsr4CreateFlags(true, false, kFixed) == (kInverted | kInfinite | kAuto | kNonLinear) &&
+               edvr::fsr4CreateFlags(false, false, kFixed) == (kInverted | kAuto | kNonLinear),
+               "copy route: AUTO_EXPOSURE stays whatever exposure is asked, its flags unchanged"))
+        return false;
+    // AMD's contract (super-resolution-ml.md, Exposure; ffx_upscale.h): the 1x1 exposure input may be omitted only when the context
+    // has AUTO_EXPOSURE. The dispatch passes one exactly when the creation flags say it must.
+    if (!check(edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, true))),
+               "flat HDR route: the dispatch requires an exposure resource") ||
+        !check(!edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, true, edvr::fsr4Exposure(true, false))),
+               "VR world route: no exposure resource") ||
+        !check(!edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(true, false, edvr::fsr4Exposure(false, true))) &&
+               !edvr::fsr4ExposureResourceRequired(edvr::fsr4CreateFlags(false, false, edvr::fsr4Exposure(false, false))),
+               "copy route: no exposure resource"))
         return false;
     if (!check(edvr::fsr4DispatchFlags(false) == (1u << 1) && edvr::fsr4DispatchFlags(true) == 0u,
                "dispatch declares LDR colour sRGB and leaves HDR alone"))
@@ -285,11 +319,12 @@ bool flagsSelfTest() {
     // The debug view (advanced.fsr4_debug_view): FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION (1 << 9) at create and
     // FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW (1 << 0) at dispatch when on; neither when off.
     constexpr uint32_t kDebugVisualization = 1u << 9, kDrawDebugView = 1u << 0;
-    if (!check(edvr::fsr4CreateFlags(false, false, true) == (kInverted | kAuto | kNonLinear | kDebugVisualization) &&
-               edvr::fsr4CreateFlags(true, true, true) == (kHdr | kInverted | kInfinite | kAuto | kDebugVisualization),
+    if (!check(edvr::fsr4CreateFlags(false, false, kAutomatic, true) == (kInverted | kAuto | kNonLinear | kDebugVisualization) &&
+               edvr::fsr4CreateFlags(true, true, kAutomatic, true) == (kHdr | kInverted | kInfinite | kAuto | kDebugVisualization) &&
+               edvr::fsr4CreateFlags(true, true, kFixed, true) == (kHdr | kInverted | kInfinite | kDebugVisualization),
                "debug view on: the create flags add DEBUG_VISUALIZATION and nothing else") ||
-        !check(edvr::fsr4CreateFlags(false, false, false) == (kInverted | kAuto | kNonLinear) &&
-               edvr::fsr4CreateFlags(true, true, false) == (kHdr | kInverted | kInfinite | kAuto),
+        !check(edvr::fsr4CreateFlags(false, false, kAutomatic, false) == (kInverted | kAuto | kNonLinear) &&
+               edvr::fsr4CreateFlags(true, true, kAutomatic, false) == (kHdr | kInverted | kInfinite | kAuto),
                "debug view off: no DEBUG_VISUALIZATION at create"))
         return false;
     return check(edvr::fsr4DispatchFlags(false, true) == ((1u << 1) | kDrawDebugView) &&
@@ -297,8 +332,6 @@ bool flagsSelfTest() {
                  edvr::fsr4DispatchFlags(false, false) == (1u << 1) && edvr::fsr4DispatchFlags(true, false) == 0u,
                  "debug view on: the dispatch adds DRAW_DEBUG_VIEW; off: neither");
 }
-
-// ---- camera and time ----
 
 bool cameraSelfTest() {
     float n = 0.0f, f = 0.0f;
@@ -522,6 +555,7 @@ struct FlightSpec {
     bool typelessDepth = false; // depth is R32_TYPELESS with a depth-stencil bind (a CopyResource of a depth texture)
     unsigned slot = 0;
     unsigned frames = 5;
+    bool flatProfile = false;   // with hdr, the flat HDR route: fixed exposure and the bridge's 1x1 exposure texture
 };
 
 // One slot, a few frames over a constant scene (colour 0.25/0.5/0.75, far reversed-Z depth, no motion), jittered. True when every
@@ -547,6 +581,12 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context, const FlightSpec
     if (!check(clear(device, context, colour.Get(), lit) && depthCleared && clear(device, context, motion.Get(), zero) &&
                clear(device, context, output.Get(), zero), "clear render-grid inputs and output"))
         return false;
+    // The profile is the engine's only input that picks the exposure; the rig's default is the VR one. Restored on every return.
+    struct ProfileScope {
+        edvr::RuntimeProfile previous = edvr::g_runtimeProfile.load();
+        explicit ProfileScope(bool flat) { if (flat) edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat); }
+        ~ProfileScope() { edvr::runtimeProfileSet(previous); }
+    } profile(spec.flatProfile);
     for (unsigned frame = 0; frame < spec.frames; ++frame) {
         const char* why = nullptr;
         const float jx = (frame % 2) ? 0.25f : -0.25f, jy = (frame % 2) ? -0.125f : 0.125f;   // never a null vector
@@ -558,8 +598,8 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context, const FlightSpec
         }
     }
     if (!check(anyNonZero(device, context, output.Get()), "D3D11 readback of the output holds a nonzero byte")) return false;
-    std::fprintf(stderr, "fsr4_engine_test: PASS %s%s%s%s %ux%u -> %ux%u, %u frames slot=%u\n", spec.hdr ? "HDR" : "LDR",
-                 spec.infinite ? " infinite-depth" : "", spec.pad ? " box-copy" : "", spec.typelessDepth ? " typeless-depth" : "",
+    std::fprintf(stderr, "fsr4_engine_test: PASS %s%s%s%s%s %ux%u -> %ux%u, %u frames slot=%u\n", spec.hdr ? "HDR" : "LDR",
+                 spec.hdr && spec.flatProfile ? " flat fixed-exposure" : "", spec.infinite ? " infinite-depth" : "", spec.pad ? " box-copy" : "", spec.typelessDepth ? " typeless-depth" : "",
                  spec.w, spec.h, spec.outW, spec.outH, spec.frames, spec.slot);
     return true;
 }
@@ -688,6 +728,9 @@ int gpuTest(bool optional) {
     FlightSpec ldr;
     FlightSpec hdr = ldr;
     hdr.hdr = true;
+    FlightSpec hdrFlat = hdr;
+    hdrFlat.flatProfile = true;
+    hdrFlat.infinite = true;   // as the flat HDR route calls it (flat_mono_resolve.cpp)
     FlightSpec infinite = ldr;
     infinite.infinite = true;
     FlightSpec boxed = ldr;
@@ -695,6 +738,7 @@ int gpuTest(bool optional) {
     FlightSpec typeless = ldr;
     typeless.typelessDepth = true;
     bool good = flight(device.Get(), context.Get(), ldr) && flight(device.Get(), context.Get(), hdr) &&
+                flight(device.Get(), context.Get(), hdrFlat) &&
                 flight(device.Get(), context.Get(), infinite) && flight(device.Get(), context.Get(), boxed) &&
                 flight(device.Get(), context.Get(), typeless);
     // The provider label is what the price line prints: "fsr 4.x.y" once a context has reported its provider.
@@ -719,7 +763,8 @@ int main(int argc, char** argv) {
         std::puts("fsr4_engine_test: plan -- --self-test: version pick (only 3.1.5 refuses; 3.1.5 and 4.1.1 picks 4.1.1; 4.1.2 preferred over a "
                   "higher 4.x; prefixed and garbage names), served labels, the F8 row label and status line, "
                   "refusal text, typed formats, creation and dispatch flags, camera planes, frame time, failure latch, slot range, "
-                  "null device, failed probe; --gpu-test-if-available: availability or a clean refusal, then LDR and HDR 128x128 -> 192x192 "
+                  "null device, failed probe; --gpu-test-if-available: availability or a clean refusal, then LDR, HDR and flat HDR (fixed "
+                  "exposure) 128x128 -> 192x192 "
                   "with a nonzero-output readback, box copy, release and re-create counts. No file or device is created by --dry-run.");
         return 0;
     }

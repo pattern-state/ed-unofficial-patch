@@ -35,8 +35,9 @@ bool fsr4Available(ID3D11Device* dev, const char** why);
 // evaluation (0 = unknown). nearZ/farZ are the reversed-Z planes (0 = unknown), fovY the vertical field of view in
 // radians (0 = unknown). infiniteDepth and hdr have fsr3Evaluate's meaning: on the flat HDR route the colour is
 // HDR scene radiance (R11G11B10_FLOAT), out is R16G16B16A16_FLOAT, and the context takes the HDR bit; otherwise
-// colour and out are display-referred RGBA8 and declared non-linear sRGB to AMD. Both routes take AMD's automatic
-// exposure (fsr4_version.h, fsr4CreateFlags).
+// colour and out are display-referred RGBA8 and declared non-linear sRGB to AMD. The flat profile's HDR route takes a
+// fixed exposure of 1.0, as DLSS does there; the copy route and the VR world route take AMD's automatic exposure (fsr4_version.h,
+// fsr4Exposure).
 // Both are part of the context key, as are the sizes: a change remakes the slot's context.
 // The inputs are copied into the bridge's shared textures and out is written by a D3D11 copy, so no particular
 // bind flags are needed on any of them. False on any refusal, with why.

@@ -340,10 +340,13 @@ constexpr float kFsr4DefaultNearZ = 0.025f;
 constexpr float kFsr4DefaultFarZ = 50000.0f;
 constexpr float kFsr4NominalFrameMs = 11.1f;
 
-// AMD's cameraNear/cameraFar under reversed Z, exactly as fsr3_engine.cpp computes them: the larger of the pair goes in as
-// cameraNear (AMD's own check warns otherwise; its depth transform takes the min and max itself), an infinite projection hands
-// FLT_MAX as the far plane and so FLT_MAX as cameraNear, and planes that are unknown (0, or not finite) take the documented
-// defaults. False, with a reason, only for an infinite projection with no finite positive near plane.
+// AMD's cameraNear/cameraFar in the order AMD's own sample passes them, reversed Z included: the nearer plane as cameraNear and
+// the farther as cameraFar, FLT_MAX for an infinite projection. The pair may arrive either way round; the smaller is the near
+// plane. FSR 3.1 (fsr3_engine.cpp) passes them the other way round, larger first, which its port accepts because its depth
+// transform takes the min and max itself. FSR 4's provider is closed, and AMD's FSR 4 debug checker warns of depth separation
+// artefacts when infinite and inverted depth come with a very low cameraFar (super-resolution-ml.md), which that order gives.
+// Planes that are unknown (0, or not finite) take the documented defaults. False, with a reason, only for an infinite projection
+// with no finite positive near plane.
 inline bool fsr4CameraPlanes(float nearZ, float farZ, bool infiniteDepth, float* camNear, float* camFar, const char** why) {
     float n = std::isfinite(nearZ) ? nearZ : 0.0f;
     float f = std::isfinite(farZ) ? farZ : 0.0f;
@@ -352,14 +355,14 @@ inline bool fsr4CameraPlanes(float nearZ, float farZ, bool infiniteDepth, float*
             if (why) *why = "infinite depth requires a finite positive near plane";
             return false;
         }
-        f = FLT_MAX;   // AMD requires cameraNear = FLT_MAX for an infinite reversed projection
+        f = FLT_MAX;   // an infinite projection's far plane
     }
     if (n <= 0.0f || f <= 0.0f) {
         n = kFsr4DefaultNearZ;
         f = kFsr4DefaultFarZ;
     }
-    *camNear = n > f ? n : f;
-    *camFar = n > f ? f : n;
+    *camNear = n < f ? n : f;
+    *camFar = n < f ? f : n;
     return true;
 }
 

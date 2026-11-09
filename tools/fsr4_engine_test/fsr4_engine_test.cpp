@@ -303,21 +303,23 @@ bool flagsSelfTest() {
 bool cameraSelfTest() {
     float n = 0.0f, f = 0.0f;
     const char* why = nullptr;
-    if (!check(edvr::fsr4CameraPlanes(0.1f, 1000.0f, false, &n, &f, &why) && n == 1000.0f && f == 0.1f, "the larger plane is cameraNear") ||
-        !check(edvr::fsr4CameraPlanes(1000.0f, 0.1f, false, &n, &f, &why) && n == 1000.0f && f == 0.1f, "the order given does not matter") ||
-        !check(edvr::fsr4CameraPlanes(0.0f, 0.0f, false, &n, &f, &why) && n == edvr::kFsr4DefaultFarZ && f == edvr::kFsr4DefaultNearZ,
+    // AMD's order, as its sample passes them: cameraNear the near plane, cameraFar the far one (FLT_MAX when infinite).
+    if (!check(edvr::fsr4CameraPlanes(0.1f, 1000.0f, false, &n, &f, &why) && n == 0.1f && f == 1000.0f, "cameraNear is the near plane, cameraFar the far") ||
+        !check(edvr::fsr4CameraPlanes(1000.0f, 0.1f, false, &n, &f, &why) && n == 0.1f && f == 1000.0f, "the order given does not matter") ||
+        !check(edvr::fsr4CameraPlanes(0.0f, 0.0f, false, &n, &f, &why) && n == edvr::kFsr4DefaultNearZ && f == edvr::kFsr4DefaultFarZ,
                "unknown planes take the documented defaults") ||
-        !check(edvr::fsr4CameraPlanes(0.1f, 0.0f, false, &n, &f, &why) && n == edvr::kFsr4DefaultFarZ && f == edvr::kFsr4DefaultNearZ,
+        !check(edvr::fsr4CameraPlanes(0.1f, 0.0f, false, &n, &f, &why) && n == edvr::kFsr4DefaultNearZ && f == edvr::kFsr4DefaultFarZ,
                "an unknown far plane takes both defaults, as route 1 does") ||
-        !check(edvr::fsr4CameraPlanes(0.1f, 123.0f, true, &n, &f, &why) && n == FLT_MAX && f == 0.1f,
-               "infinite depth: cameraNear FLT_MAX, cameraFar the near plane"))
+        !check(edvr::fsr4CameraPlanes(0.1f, 123.0f, true, &n, &f, &why) && n == 0.1f && f == FLT_MAX,
+               "infinite depth: cameraNear the near plane, cameraFar FLT_MAX"))
         return false;
     why = nullptr;
     if (!check(!edvr::fsr4CameraPlanes(0.0f, 0.0f, true, &n, &f, &why) && why && std::strstr(why, "near plane"),
                "infinite depth without a near plane is refused with a reason")) return false;
     const float nan = std::numeric_limits<float>::quiet_NaN();
     if (!check(!edvr::fsr4CameraPlanes(nan, 0.0f, true, &n, &f, &why), "infinite depth with a NaN near plane is refused") ||
-        !check(edvr::fsr4CameraPlanes(nan, nan, false, &n, &f, &why) && n == edvr::kFsr4DefaultFarZ, "NaN planes read as unknown"))
+        !check(edvr::fsr4CameraPlanes(nan, nan, false, &n, &f, &why) && n == edvr::kFsr4DefaultNearZ && f == edvr::kFsr4DefaultFarZ,
+               "NaN planes read as unknown"))
         return false;
     return check(edvr::fsr4FrameTimeMs(0.0f) == 11.1f && edvr::fsr4FrameTimeMs(-3.0f) == 11.1f && edvr::fsr4FrameTimeMs(nan) == 11.1f,
                  "an unknown frame time is a nominal 11.1 ms") &&

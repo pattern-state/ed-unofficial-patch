@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cwchar>
 
+#include "../common/config.h"   // advanced.fsr4_debug_view
 #include "../common/log.h"
 #include "dlaa.h"          // kUpscalerSlots: one FSR 4 context per upscaler slot
 #include "fsr4_version.h"  // the pure decisions: version pick, refusal text, formats, flags, camera planes
@@ -54,6 +55,8 @@ static_assert(kFsrFlagDepthInfinite == static_cast<uint32_t>(FFX_UPSCALE_ENABLE_
 static_assert(kFsrFlagAutoExposure == static_cast<uint32_t>(FFX_UPSCALE_ENABLE_AUTO_EXPOSURE), "auto exposure bit");
 static_assert(kFsr4FlagNonLinearColourspace == static_cast<uint32_t>(FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE), "non-linear colour space bit");
 static_assert(kFsr4DispatchNonLinearSrgb == static_cast<uint32_t>(FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB), "dispatch sRGB bit");
+static_assert(kFsr4FlagDebugVisualization == static_cast<uint32_t>(FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION), "debug visualization bit");
+static_assert(kFsr4DispatchDrawDebugView == static_cast<uint32_t>(FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW), "dispatch debug view bit");
 #endif
 
 namespace {
@@ -795,7 +798,7 @@ bool makeContext(State& state, Feature& feature, const char** why) {
     feature.descs = std::make_unique<ContextDescs>();
     ContextDescs& d = *feature.descs;
     d.upscale.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    d.upscale.flags = fsr4CreateFlags(key.infiniteDepth, key.hdr);
+    d.upscale.flags = fsr4CreateFlags(key.infiniteDepth, key.hdr, key.debugView);
     d.upscale.maxRenderSize = FfxApiDimensions2D{key.inW, key.inH};
     d.upscale.maxUpscaleSize = FfxApiDimensions2D{key.outW, key.outH};
     d.upscale.fpMessage = &ffxMessage;
@@ -825,9 +828,9 @@ bool makeContext(State& state, Feature& feature, const char** why) {
                     unsigned(d.upscale.flags));
     }
     feature.context = context;
-    Log::get().note("fsr4: slot=%u context created in %.1f ms: in=%ux%u out=%ux%u flags=0x%X infinite=%u hdr=%u",
+    Log::get().note("fsr4: slot=%u context created in %.1f ms: in=%ux%u out=%ux%u flags=0x%X infinite=%u hdr=%u debug_view=%u",
                     feature.slot, qpcSpanMs(began, ended), key.inW, key.inH, key.outW, key.outH,
-                    unsigned(d.upscale.flags), key.infiniteDepth ? 1u : 0u, key.hdr ? 1u : 0u);
+                    unsigned(d.upscale.flags), key.infiniteDepth ? 1u : 0u, key.hdr ? 1u : 0u, key.debugView ? 1u : 0u);
 
     // Which provider AMD actually bound. D7 belt and braces: the override above asked for a 4.x one; a context on anything older
     // is destroyed, never run in fsr4's name.
@@ -1271,6 +1274,9 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     Fsr4ContextKey key;
     key.inW = w; key.inH = h; key.outW = outW; key.outH = outH;
     key.infiniteDepth = infiniteDepth; key.hdr = hdr;
+    // advanced.fsr4_debug_view, read live in both profiles: a change is a new key, so the slot's context is made again with or
+    // without AMD's debug visualization.
+    key.debugView = Config::get().getBool("advanced.fsr4_debug_view", false);
     key.colourFormat = static_cast<uint32_t>(colourPlan.typed);
     key.depthFormat = static_cast<uint32_t>(depthPlan.typed);
     key.motionFormat = static_cast<uint32_t>(motionPlan.typed);
@@ -1403,7 +1409,7 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
     dispatch.cameraFar = camFar;
     dispatch.cameraFovAngleVertical = fovY;
     dispatch.viewSpaceToMetersFactor = 1.0f;
-    dispatch.flags = fsr4DispatchFlags(hdr);
+    dispatch.flags = fsr4DispatchFlags(hdr, feature.key.debugView);
 
     // The two timestamps bracket ffxDispatch alone; the barriers around it are outside the measured span.
     if (command.timingHeap.Get()) list->EndQuery(command.timingHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);

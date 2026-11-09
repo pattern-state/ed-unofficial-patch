@@ -200,11 +200,13 @@ inline bool fsr4ProviderIsFour(const char* name, uint64_t providerId, uint64_t r
 struct Fsr4ContextKey {
     uint32_t inW = 0, inH = 0, outW = 0, outH = 0;
     bool infiniteDepth = false, hdr = false;
+    // advanced.fsr4_debug_view: AMD's debug visualization is a create flag, so turning the view on or off remakes the context.
+    bool debugView = false;
     uint32_t colourFormat = 0, depthFormat = 0, motionFormat = 0, outFormat = 0;
 
     bool operator==(const Fsr4ContextKey& o) const {
         return inW == o.inW && inH == o.inH && outW == o.outW && outH == o.outH &&
-               infiniteDepth == o.infiniteDepth && hdr == o.hdr &&
+               infiniteDepth == o.infiniteDepth && hdr == o.hdr && debugView == o.debugView &&
                colourFormat == o.colourFormat && depthFormat == o.depthFormat &&
                motionFormat == o.motionFormat && outFormat == o.outFormat;
     }
@@ -309,17 +311,25 @@ inline DXGI_FORMAT fsr4TypedFormat(Fsr4Role role, DXGI_FORMAT source) {
 // FSR 3.1 DX11 port's). The engine static_asserts each against the real enum, as it does the shared ones.
 constexpr uint32_t kFsr4FlagNonLinearColourspace = 1u << 8;   // FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE
 constexpr uint32_t kFsr4DispatchNonLinearSrgb = 1u << 1;      // FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB
+constexpr uint32_t kFsr4FlagDebugVisualization = 1u << 9;     // FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION
+constexpr uint32_t kFsr4DispatchDrawDebugView = 1u << 0;      // FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW
 
 // Creation flags: route 1's (reversed Z always, infinite depth when asked, the HDR bit on the HDR route; hdr_backend_flags.h)
 // with no AMD debug checking, and two of FSR 4's own: automatic exposure on both routes, because AMD documents the exposure
 // input as optional only when that flag is set and recommends it (route 1 runs the LDR route with neither, which FSR 3.1
 // accepts); and on the display-referred LDR route the non-linear colour space, which FSR 4 asks of colour that is not linear.
-inline constexpr uint32_t fsr4CreateFlags(bool infiniteDepth, bool hdr) {
-    return flatFsrCreateFlags(infiniteDepth, false, hdr) | kFsrFlagAutoExposure | (hdr ? 0u : kFsr4FlagNonLinearColourspace);
+// debugView (advanced.fsr4_debug_view, a diagnostic) adds AMD's debug visualization, which the dispatch's DRAW_DEBUG_VIEW needs.
+inline constexpr uint32_t fsr4CreateFlags(bool infiniteDepth, bool hdr, bool debugView = false) {
+    return flatFsrCreateFlags(infiniteDepth, false, hdr) | kFsrFlagAutoExposure | (hdr ? 0u : kFsr4FlagNonLinearColourspace) |
+           (debugView ? kFsr4FlagDebugVisualization : 0u);
 }
 
-// Dispatch flags: LDR colour is declared sRGB; HDR scene radiance is linear and needs none.
-inline constexpr uint32_t fsr4DispatchFlags(bool hdr) { return hdr ? 0u : kFsr4DispatchNonLinearSrgb; }
+// Dispatch flags: LDR colour is declared sRGB; HDR scene radiance is linear and needs none. debugView draws AMD's debug view
+// (motion vectors, blend factor and the rest of AMD's panels) into the output in place of the picture, as FSR 3.1's
+// Fsr3Settings::debug does with DRAW_DEBUG_VIEW.
+inline constexpr uint32_t fsr4DispatchFlags(bool hdr, bool debugView = false) {
+    return (hdr ? 0u : kFsr4DispatchNonLinearSrgb) | (debugView ? kFsr4DispatchDrawDebugView : 0u);
+}
 
 // ---- camera and time ----
 

@@ -19,6 +19,9 @@ inline bool flatProfileReadsKey(const char* key) {
         // The refusal view (flat_runtime.cpp): paints the prep's per-pixel class over the resolved image. A flat panel row on the Debug tab.
         // Unlisted, getBool answers false here whatever the file says.
         std::strcmp(key, "advanced.flat_refusal_view") == 0 ||
+        // FSR 4's own debug view (fsr4_engine.cpp): AMD's debug panels in place of the upscaled picture, a diagnostic for both profiles.
+        // Unlisted, getBool answers false here whatever the file says.
+        std::strcmp(key, "advanced.fsr4_debug_view") == 0 ||
         // The CPU timing in the log (flat_runtime.cpp, flat_cpu.h Census::setClocks): the census's clocks, off unless this is on. A flat panel row
         // on the Debug tab. Unlisted, getBool answers false here whatever the file says, and the timing could never be turned on from the panel.
         std::strcmp(key, "advanced.flat_cpu_timing") == 0 ||

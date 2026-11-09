@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "../../src/common/config.h"
 #include "../../src/common/log.h"
 #include "../../src/d3d11/fsr4_engine.h"
 #include "../../src/d3d11/fsr4_version.h"
@@ -49,6 +50,9 @@ void Log::note(const char* format, ...) {
     va_end(args);
     std::fputc('\n', stderr);
 }
+// The engine reads advanced.fsr4_debug_view live; this rig has no settings file, so every key reads as its default.
+Config& Config::get() { static Config config; return config; }
+bool Config::getBool(const char*, bool def) const { return def; }
 }  // namespace edvr
 
 namespace {
@@ -209,17 +213,20 @@ bool latchSelfTest() {
                "failed key keeps its precise reason")) return false;
     latch.clearIfDifferent(original);
     if (!check(latch.matches(original), "same key stays failed without retry")) return false;
-    edvr::Fsr4ContextKey changes[10] = {original, original, original, original, original,
-                                        original, original, original, original, original};
+    edvr::Fsr4ContextKey changes[11] = {original, original, original, original, original,
+                                        original, original, original, original, original, original};
     ++changes[0].inW; ++changes[1].inH; ++changes[2].outW; ++changes[3].outH;
     changes[4].infiniteDepth = true; changes[5].hdr = true;
     ++changes[6].colourFormat; ++changes[7].depthFormat; ++changes[8].motionFormat; ++changes[9].outFormat;
+    changes[10].debugView = true;
     for (const auto& changed : changes) {
         latch.record(original, "unavailable");
         latch.clearIfDifferent(changed);
         if (!check(!latch.matches(original) && !latch.matches(changed),
-                   "a size, depth, HDR or format change clears the failed key")) return false;
+                   "a size, depth, HDR, format or debug view change clears the failed key")) return false;
     }
+    // The debug view's create bit is in the key: turning it on or off is a new key, so the context is made again.
+    if (!check(!(original == changes[10]), "the debug view is part of the context key")) return false;
     latch.record(original, "shared texture failed");
     latch.clear();
     if (!check(!latch.matches(original), "a mode reset clears the failed key")) return false;
@@ -272,8 +279,23 @@ bool flagsSelfTest() {
         !check(edvr::fsr4CreateFlags(false, true) == (kHdr | kInverted | kAuto), "HDR creation flags: HDR, reversed Z, automatic exposure, no non-linear bit") ||
         !check(edvr::fsr4CreateFlags(true, true) == (kHdr | kInverted | kInfinite | kAuto), "HDR infinite depth"))
         return false;
-    return check(edvr::fsr4DispatchFlags(false) == (1u << 1) && edvr::fsr4DispatchFlags(true) == 0u,
-                 "dispatch declares LDR colour sRGB and leaves HDR alone");
+    if (!check(edvr::fsr4DispatchFlags(false) == (1u << 1) && edvr::fsr4DispatchFlags(true) == 0u,
+               "dispatch declares LDR colour sRGB and leaves HDR alone"))
+        return false;
+    // The debug view (advanced.fsr4_debug_view): FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION (1 << 9) at create and
+    // FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW (1 << 0) at dispatch when on; neither when off.
+    constexpr uint32_t kDebugVisualization = 1u << 9, kDrawDebugView = 1u << 0;
+    if (!check(edvr::fsr4CreateFlags(false, false, true) == (kInverted | kAuto | kNonLinear | kDebugVisualization) &&
+               edvr::fsr4CreateFlags(true, true, true) == (kHdr | kInverted | kInfinite | kAuto | kDebugVisualization),
+               "debug view on: the create flags add DEBUG_VISUALIZATION and nothing else") ||
+        !check(edvr::fsr4CreateFlags(false, false, false) == (kInverted | kAuto | kNonLinear) &&
+               edvr::fsr4CreateFlags(true, true, false) == (kHdr | kInverted | kInfinite | kAuto),
+               "debug view off: no DEBUG_VISUALIZATION at create"))
+        return false;
+    return check(edvr::fsr4DispatchFlags(false, true) == ((1u << 1) | kDrawDebugView) &&
+                 edvr::fsr4DispatchFlags(true, true) == kDrawDebugView &&
+                 edvr::fsr4DispatchFlags(false, false) == (1u << 1) && edvr::fsr4DispatchFlags(true, false) == 0u,
+                 "debug view on: the dispatch adds DRAW_DEBUG_VIEW; off: neither");
 }
 
 // ---- camera and time ----

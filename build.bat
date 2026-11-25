@@ -436,6 +436,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvr_selftest_scene_draws ^
     --extra-export edvr_selftest_flat_sdk_snapshot ^
     --extra-export edvr_selftest_flat_sdk_owner_view ^
+    --extra-export edvr_selftest_render_boundary_owner ^
     --extra-export edvr_selftest_flat_sdk_foreground_map ^
     --extra-export edvr_selftest_binding ^
     --extra-export edvr_selftest_profile_post ^
@@ -690,13 +691,16 @@ if errorlevel 1 ( echo [edvr] ERROR: ml64 failed & exit /b 1 )
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\weapon_ui_getter_probe.obj" "src\d3d11\weapon_ui_getter_probe.asm" >nul
 if errorlevel 1 ( echo [edvr] ERROR: ml64 failed on weapon UI getter probe & exit /b 1 )
 
-python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_probe.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% %FSR4FLAGS% /Fo"%OBJ%\d3d11"\ ^
+ml64.exe /nologo /c /Fo"%OBJ%\d3d11\game_render_scale_entry.obj" "src\d3d11\game_render_scale_entry.asm" >nul
+if errorlevel 1 ( echo [edvr] ERROR: ml64 failed on game render scale entry & exit /b 1 )
+
+python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_probe.obj --keep game_render_scale_entry.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% %FSR4FLAGS% /Fo"%OBJ%\d3d11"\ ^
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
     "src\common\guard.cpp" "src\common\vtable_hook.cpp" "src\common\code_hook.cpp" ^
     "src\common\hotkey.cpp" "src\common\proxy.cpp" ^
     "src\common\frame_flag.cpp" "src\common\game_build.cpp" ^
-    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" ^
+    "src\common\iat_hook.cpp" "src\common\iniedit.cpp" "src\common\settings_write_target.cpp" ^
     "src\d3d11\input_gate.cpp" "src\d3d11\joy_watch.cpp" "src\d3d11\hotkey_capture.cpp" "src\d3d11\menu.cpp" ^
     "src\d3d11\oculus_route.cpp" ^
     "src\d3d11\menu_keys.cpp" ^
@@ -750,6 +754,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\remlok_fix.cpp" "src\d3d11\holo_fix.cpp" ^
     "src\d3d11\target_sharp.cpp" "src\d3d11\night_vision.cpp" ^
     "src\d3d11\wake_pulse.cpp" "src\d3d11\vr_ssaa_gate.cpp" "src\d3d11\vr_ssaa_hold.cpp" "src\d3d11\vr_display_observer.cpp" "src\d3d11\vr_window_trampolines.cpp" ^
+    "src\d3d11\game_render_scale.cpp" "src\d3d11\game_render_scale_binding.cpp" ^
     "src\d3d11\mode_watch.cpp" ^
     "src\d3d11\ui_depth.cpp" ^
     "src\d3d11\ui_layer.cpp" "src\d3d11\scope_zoom.cpp" "src\d3d11\ui_surfaces.cpp" "src\d3d11\ui_panel_scale.cpp" "src\d3d11\orbital_width.cpp" "src\d3d11\supercruise_bars.cpp" "src\d3d11\srv_turret.cpp" "src\d3d11\srv_turret_entry_fade.cpp" "src\d3d11\srv_turret_press.cpp" "src\d3d11\srv_radar_anchor.cpp" ^
@@ -1965,6 +1970,7 @@ if not exist "%OBJ%\cfgtest" mkdir "%OBJ%\cfgtest"
     /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /Fo"%OBJ%\cfgtest"\ ^
     /Fe"%BUILD%\config_test.exe" "tools\config_test\config_test.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
+    "src\common\settings_write_target.cpp" "src\common\iniedit.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib
 if errorlevel 1 ( echo [edvr] ERROR: config_test build failed & exit /b 1 )
 if "%EDVR_RIG_STEP%"=="build" exit /b 0
@@ -3136,6 +3142,17 @@ if errorlevel 1 ( echo [edvr] ERROR: XeSS engine test runtime staging failed & e
 "%OBJ%\xess_engine_test\xess_engine_test.exe" --gpu-test-if-available || exit /b 1
 exit /b 0
 
+:rig_fsr4_quality_test
+REM Shared quality values and parser policy; pure CPU, independent of SDK/GPU.
+if not exist "%OBJ%\fsr4_quality_test" mkdir "%OBJ%\fsr4_quality_test"
+%CC% /nologo /W4 /O2 /EHsc /std:c++17 /MT ^
+    /Fo"%OBJ%\fsr4_quality_test\\" /Fe"%BUILD%\fsr4_quality_test.exe" ^
+    "tools\fsr4_quality_test\fsr4_quality_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: FSR4 quality test build failed & exit /b 1 )
+"%BUILD%\fsr4_quality_test.exe" --dry-run || exit /b 1
+"%BUILD%\fsr4_quality_test.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_fsr4_engine_test
 REM FSR 4 bridge contracts and hardware readback, the twin of :rig_xess_engine_test. GPU-less or unsupported
 REM adapters skip explicitly, and so does a runtime that offers only FSR 3.1.5 (decision D7); a supported adapter
@@ -3415,7 +3432,8 @@ if not exist "%OBJ%\insttest" mkdir "%OBJ%\insttest"
     "src\installer\detect.cpp" "src\installer\probe.cpp" ^
     "src\common\iniedit.cpp" "src\installer\state.cpp" ^
     "src\installer\mirror.cpp" ^
-    "src\installer\settings.cpp" "src\installer\logbundle.cpp" ^
+    "src\installer\settings.cpp" "src\installer\settings_view.cpp" ^
+    "src\installer\ui.cpp" "src\installer\logbundle.cpp" ^
     "src\installer\app.cpp" "src\installer\payload.cpp" ^
     /link /INCREMENTAL:NO %INSTALLER_LIBS%
 if errorlevel 1 ( echo [edvr] ERROR: installer_test build failed & exit /b 1 )
@@ -3825,6 +3843,7 @@ if not exist "%OBJ%\menueditHold" mkdir "%OBJ%\menueditHold"
     /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
     /Fo"%OBJ%\menueditHold"\ /Fe"%OBJ%\menueditHold\menu_edit_hold_test.exe" ^
     "tools\menu_edit_hold_test\menu_edit_hold_test.cpp" ^
+    "src\common\settings_write_target.cpp" "src\common\iniedit.cpp" ^
     /link /INCREMENTAL:NO
 if errorlevel 1 ( echo [edvr] ERROR: menu_edit_hold_test build failed & exit /b 1 )
 "%OBJ%\menueditHold\menu_edit_hold_test.exe" --dry-run || exit /b 1
@@ -4710,3 +4729,22 @@ if errorlevel 1 ( echo [edvr] ERROR: addon_manager_test build failed & exit /b 1
 "%BUILD%\addon_manager_test.exe" --self-test || exit /b 1
 exit /b 0
 
+
+:rig_game_render_scale_test
+echo [edvr] === game_render_scale_test.exe ===
+if not exist "%OBJ%\game_render_scale_test" mkdir "%OBJ%\game_render_scale_test"
+ml64.exe /nologo /c /Fo"%OBJ%\game_render_scale_test\entry.obj" "src\d3d11\game_render_scale_entry.asm" >nul
+if errorlevel 1 exit /b 1
+ml64.exe /nologo /c /Fo"%OBJ%\game_render_scale_test\test_entry.obj" "tools\game_render_scale_test\game_render_scale_entry_test.asm" >nul
+if errorlevel 1 exit /b 1
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /WX /GR- /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\game_render_scale_test"\ /Fe"%OBJ%\game_render_scale_test\game_render_scale_test.exe" ^
+    "tools\game_render_scale_test\game_render_scale_test.cpp" ^
+    "src\d3d11\game_render_scale_binding.cpp" "src\common\code_hook.cpp" ^
+    "%OBJ%\game_render_scale_test\entry.obj" "%OBJ%\game_render_scale_test\test_entry.obj" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%OBJ%\game_render_scale_test\game_render_scale_test.exe" --dry-run || exit /b 1
+"%OBJ%\game_render_scale_test\game_render_scale_test.exe" --self-test || exit /b 1
+"%OBJ%\game_render_scale_test\game_render_scale_test.exe" --abi-test || exit /b 1
+exit /b 0

@@ -790,6 +790,34 @@ std::string withoutSpaces(const std::string& t) {
     return out;
 }
 
+// Find this definition independently of its parameter list; a declaration or call is not a body.
+bool presentBoundaryBody(const std::string& text, std::string* body) {
+    body->clear();
+    const size_t head = text.find("void presentFrameBoundary(");
+    if (head == std::string::npos) return false;
+    const size_t open = text.find('(', head);
+    const size_t close = closingParen(text, open);
+    if (close == std::string::npos) return false;
+    size_t brace = close + 1;
+    while (brace < text.size() && isspace(static_cast<unsigned char>(text[brace]))) ++brace;
+    if (brace == text.size() || text[brace] != '{') return false;
+    int depth = 0;
+    bool inString = false;
+    for (size_t i = brace; i < text.size(); ++i) {
+        const char c = text[i];
+        if (inString) {
+            if (c == '\\') ++i;
+            else if (c == '"') inString = false;
+        } else if (c == '"') inString = true;
+        else if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) {
+            *body = text.substr(brace + 1, i - brace - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
 int boundarySourceChecks(const std::string& root) {
     int bad = 0;
     auto verify = [&](bool ok, const char* what) {
@@ -807,30 +835,19 @@ int boundarySourceChecks(const std::string& root) {
         return 1;
     }
 
-    // The function, without its braces.
-    const size_t head = hookText.find("void presentFrameBoundary() {");
-    verify(head != std::string::npos, "device_hook.cpp defines presentFrameBoundary()");
+    std::string parsed;
+    verify(presentBoundaryBody("void presentFrameBoundary() { tick(); }", &parsed) && withoutSpaces(parsed)=="tick();",
+           "boundary parser retains the no-argument definition");
+    verify(presentBoundaryBody("void presentFrameBoundary(bool qualityOwned, bool qualityEligible) { if (qualityOwned) { tick(qualityEligible); } }", &parsed) &&
+               withoutSpaces(parsed)=="if(qualityOwned){tick(qualityEligible);}",
+           "boundary parser retains parameterised body and nested ordering");
+    verify(!presentBoundaryBody("void presentFrameBoundary(bool owned); void other() { tick(); }", &parsed) &&
+               !presentBoundaryBody("presentFrameBoundary(true, false);", &parsed),
+           "boundary parser rejects declarations and calls instead of consuming an unrelated body");
+    verify(!presentBoundaryBody("void presentFrameBoundary(bool owned) { if (owned) { tick(); }", &parsed),
+           "boundary parser refuses an unterminated body");
     std::string body;
-    if (head != std::string::npos) {
-        size_t i = hookText.find('{', head);
-        const size_t begin = i + 1;
-        int depth = 0;
-        bool inString = false;
-        for (; i < hookText.size(); ++i) {
-            const char c = hookText[i];
-            if (inString) {
-                if (c == '\\') ++i;
-                else if (c == '"') inString = false;
-            } else if (c == '"') {
-                inString = true;
-            } else if (c == '{') {
-                ++depth;
-            } else if (c == '}' && --depth == 0) {
-                break;
-            }
-        }
-        body = hookText.substr(begin, i - begin);
-    }
+    verify(presentBoundaryBody(hookText, &body), "device_hook.cpp defines presentFrameBoundary with its actual parameters");
     const std::string tickBody = body;   // the ticks, before they are taken out below
     // Every tick call out, then what is left.
     size_t pos = 0;
@@ -902,6 +919,15 @@ int boundarySourceChecks(const std::string& root) {
     // The hooks' boundary runs FIRST in native on foot's tick: it acts on the want and the body nativeOnFootFrameBoundary published the frame before, so a change
     // acts at the next boundary and the hooks are in place from the first frame the native key is on (native_on_foot_hooks.h).
     const std::string flatTicks = withoutSpaces(tickBody);
+    const std::string lifecycle = "tkRenderScaleLifecycle.run([qualityOwned]{if(!qualityOwned)return;publishGameRenderScaleIntent();gameRenderScaleLifecycleTick(runtimeFeaturesAllowed()&&!graphicsRuntimeDisabled());});";
+    const std::string observation = "tkRenderScaleObservation.run([qualityOwned,qualityEligible]{if(!qualityOwned)return;publishGameRenderScaleIntent();gameRenderScaleFrameBoundary(qualityEligible,gameRenderScaleOutputBasis());});";
+    verify(flatTicks.find(lifecycle)!=std::string::npos &&
+               flatTicks.find("tkModeWatch.run(") < flatTicks.find(lifecycle) &&
+               flatTicks.find(lifecycle) < flatTicks.find("if(graphicsRuntimeDisabled())return;"),
+           "render-scale lifecycle/publication has its own tick after mode commit and before graphics-off, on the canonical owner only");
+    verify(flatTicks.find(observation)!=std::string::npos &&
+               flatTicks.find("tkConfigRefresh.run(") < flatTicks.find(observation),
+           "render-scale config/observation has its own late tick with distinct ownership and eligible-Present inputs");
     const std::string nativeTick = "tkNativeOnFoot.run([]{nativeOnFootHooksFrameBoundary();nativeOnFootFrameBoundary(static_cast<uint32_t>(g_state->frameCounter));});";
     verify(withoutSpaces(hookText).find("EDVR_BOUNDARY_TICK(tkNativeOnFoot,\"native_on_foot\");") != std::string::npos && flatTicks.find(nativeTick) != std::string::npos,
            "native on foot's tick is declared in device_hook.cpp and run at the top level of presentFrameBoundary(): the hooks' boundary, then native on foot's, with the frame counter");

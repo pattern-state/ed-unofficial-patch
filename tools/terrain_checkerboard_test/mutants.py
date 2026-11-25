@@ -191,7 +191,7 @@ MUTANTS = [
       "the flat panel's Elite settings know the tag", FLAT_SETTINGS),
     M("pin-start-from-dllmain", "T6d", [("BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {", "BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {\n    edvr::terrainCheckerboardTick();")],
       "the worker is started from DllMain", PROXY),
-    M("pin-start-from-hook", "T6d", [("void presentFrameBoundary() {", "void presentFrameBoundary() {\n    terrainCheckerboardTick();")], "the worker is started from the device hook's frame boundary", HOOK),
+    M("pin-start-from-hook", "T6d", [("void presentFrameBoundary(bool qualityOwned, bool qualityEligible) {", "void presentFrameBoundary(bool qualityOwned, bool qualityEligible) {\n    terrainCheckerboardTick();")], "the worker is started from the device hook's frame boundary", HOOK),
     M("pin-worker-has-dllmain", "T6d", [("namespace edvr {\n\nnamespace {\n", "BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }\n\nnamespace edvr {\n\nnamespace {\n")], "the worker's source has a DllMain", WORKER),
     M("pin-worker-joins", "T6e", [("std::thread(workerMain, &s).detach();", "std::thread(workerMain, &s).join();")], "the worker is joined, which would block the frame", WORKER),
     M("pin-worker-no-try", "T6e", [("    try {\n        std::thread(workerMain, &s).detach();\n        return true;\n    } catch (...) {\n        return false;\n    }", "    std::thread(workerMain, &s).detach();\n    return true;")],

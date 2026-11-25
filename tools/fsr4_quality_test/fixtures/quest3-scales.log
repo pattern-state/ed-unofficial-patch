@@ -1,0 +1,3 @@
+[01:26:49.961] fsr4: slot=0 dispatch #1 rc=0 in=2528x2704 out=2528x2704 hdr=0 infinite=0 jitter=(-0.000,0.000) reset=1 fences=1/2/3 copy-in=whole/whole/whole provider=fsr 4.1.2
+[01:34:13.194] fsr4: slot=1 dispatch #42000 rc=0 in=1264x1352 out=2528x2704 hdr=0 infinite=0 jitter=(-0.438,0.389) reset=0 fences=125998/125999/126000 copy-in=whole/whole/whole provider=fsr 4.1.2
+[01:36:33.016] fsr4: slot=1 dispatch #63000 rc=0 in=1896x2028 out=2528x2704 hdr=0 infinite=0 jitter=(-0.375,-0.056) reset=0 fences=188998/188999/189000 copy-in=whole/whole/whole provider=fsr 4.1.2

@@ -13,6 +13,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/temporal_mode.h"   // the map gate's pass verdict bits and flag (temporalMapStillBits, kTemporalFlagMapKeep)
 #include "../../src/d3d11/temporal_pass.h"
+#include "../../src/d3d11/native_temporal_output.h"
 #include "../../src/d3d11/ui_layer.h"
 #include "../../src/d3d11/ui_surfaces.h"
 #include "../../src/d3d11/vr_camera_census.h"
@@ -329,7 +330,32 @@ void glue(EdvrNativeTemporalTable& t,ID3D11Texture2D* source,uint64_t gen,uint64
   edvr::shutdownGlitchFrameFix();
 }
 
+void testOutputPolicy() {
+  using edvr::TemporalEngine;
+  using edvr::native_temporal_output::useRecommendedOutput;
+  const auto fsr = [](unsigned w, unsigned h, unsigned rw, unsigned rh) {
+    return useRecommendedOutput(TemporalEngine::AmdFsr4, true, w, h, rw, rh);
+  };
+  check(fsr(2502, 2676, 2528, 2704), "FSR 4 near-native input retains the recommended output");
+  check(!fsr(2528, 2704, 2528, 2704), "FSR 4 equal input keeps the existing 1:1 convention");
+  check(fsr(2502, 2704, 2528, 2704) && fsr(2528, 2676, 2528, 2704), "FSR 4 one-axis shrink retains the recommended output");
+  check(!fsr(2530, 2676, 2528, 2704) && !fsr(2502, 2706, 2528, 2704), "FSR 4 never adds downsampling on either oversized axis");
+  check(!useRecommendedOutput(TemporalEngine::AmdFsr4, false, 1264, 1352, 2528, 2704), "upscaling disabled retains the input dimensions");
+  check(!fsr(2502, 2676, 2400, 2600) && fsr(2502, 2676, 2528, 2704) && !fsr(2502, 2676, 2502, 2676),
+        "transient recommendations are evaluated independently without retaining an earlier output");
+  for (const auto engine : {TemporalEngine::Own, TemporalEngine::Nvidia, TemporalEngine::Amd, TemporalEngine::Intel}) {
+    for (unsigned w : {1250u, 2477u, 2478u, 2502u, 2528u, 2600u}) {
+      for (unsigned h : {1300u, 2649u, 2650u, 2676u, 2704u, 2800u}) {
+        const bool legacy = w * 50 < 2528u * 49 && h * 50 < 2704u * 49;
+        check(useRecommendedOutput(engine, true, w, h, 2528, 2704) == legacy,
+              "every other engine preserves the existing strict 98 percent threshold");
+      }
+    }
+  }
+}
+
 void run(){
+  testOutputPolicy();
   // N9: the warm target is the channel's raw pointer, not a live reference --
   // false with no channel acquired, the acquiring thread and device once one
   // is, false again once it closes.
@@ -553,6 +579,35 @@ void run(){
   // This is the fifteenth of native_temporal.cpp's sixteen pool channels, which channels are never returned to.
   auto fsr4=acquire(d,16,"fsr4");f=frame(16,1);begin(fsr4,f);check(treat(fsr4,1,0,source.Get())==S_OK,"FSR 4 call");c=calls.back();
   check((c.flags&2)&&(c.flags&edvr::kTemporalFlagFsr4)&&!(c.flags&64)&&!(c.flags&128)&&!(c.flags&edvr::kTemporalFlagMapKeep)&&c.outW==480&&c.outH==360,"FSR 4 asks for an external engine under its own flag bit, at the recommended size");
+  {
+    uint64_t sequence = 1;
+    const auto output = [&](unsigned w, unsigned h, unsigned rw, unsigned rh,
+                            unsigned wantedW, unsigned wantedH, bool reset) {
+      auto input = d.texture(w, h);
+      auto next = frame(16, ++sequence); next.recommendedWidth = rw; next.recommendedHeight = rh;
+      begin(fsr4, next);
+      const size_t count = calls.size();
+      check(treat(fsr4, sequence, 0, input.Get()) == S_OK && calls.size() == count + 1,
+            "FSR 4 output policy runs through the production native treatment");
+      check(calls.back().outW == wantedW && calls.back().outH == wantedH,
+            "production FSR 4 selection retains recommendation or the existing 1:1 convention");
+      check(bool(calls.back().flags & 1) == reset, "dimension changes reset history and stable dimensions retain it");
+    };
+    output(2502, 2676, 2528, 2704, 2528, 2704, true);
+    output(2502, 2676, 2528, 2704, 2528, 2704, false);
+    output(2528, 2704, 2528, 2704, 0, 0, true);
+    output(2502, 2704, 2528, 2704, 2528, 2704, true);
+    output(2528, 2676, 2528, 2704, 2528, 2704, true);
+    output(2530, 2676, 2528, 2704, 0, 0, true);
+    output(2502, 2706, 2528, 2704, 0, 0, true);
+    output(2502, 2676, 2400, 2600, 0, 0, true);
+    output(2502, 2676, 2528, 2704, 2528, 2704, true);
+    auto refused = frame(16, ++sequence); begin(fsr4, refused);
+    passSucceeds = false;
+    check(treat(fsr4, sequence, 0, source.Get()) == S_FALSE,
+          "FSR 4 output selection preserves the existing refused-pass fallback");
+    passSucceeds = true;
+  }
   check(fsr4.close(fsr4.context)==S_OK,"FSR 4 close");
   edvr::Config::get().set("fix.temporal_aa","on");edvr::openxr::NativeTemporalClient client;
   require(client.acquire(GetModuleHandleW(nullptr),d.device.Get(),15)==S_OK,"actual client validates provider table");
@@ -826,13 +881,16 @@ void run(){
       fr=frame(23,++s);begin(fl,fr);routeTookEye[0]=true;routeTookSeq=s;
       auto o=outOf(fl,s,0,under.Get());const auto dd=o.tex?descOf(o.tex.Get()):D3D11_TEXTURE2D_DESC{};
       check(o.hr==S_OK&&dd.Width==askW&&dd.Height==askH,"under the served floor the layer-only frame is exactly the size the pass is asked for (the layer never re-sizes between the two routes)");
-      routeTookEye[0]=false;routeTookSeq=0;check(fl.close(fl.context)==S_OK,"floor channel close");
-    }
-    // The pass stood down, or AA is off: the route cannot take an eye's frame at all -- the ordinary passthrough answers.
-    {
-      auto off=acquire(d,26,"off");auto fr=frame(26,1);begin(off,fr);routeTookEye[0]=true;routeTookSeq=1;
-      auto o=outOf(off,1,0,source.Get());check(o.hr==S_FALSE&&!o.tex,"fix.temporal_aa off: a layer-only claim changes nothing (the ordinary passthrough)");
-      routeTookEye[0]=false;routeTookSeq=0;check(off.close(off.context)==S_OK,"off channel close");
+      routeTookEye[0]=false;routeTookSeq=0;
+      // Reuse this channel for AA off: the process-lifetime pool has sixteen
+      // entries, and the preceding cases (including the real client) use all.
+      edvr::Config::get().set("fix.temporal_aa", "off");
+      // treat reads pending settings; the next begin adopts that coherent pair.
+      fr=frame(23,++s);begin(fl,fr);treat(fl,s,0,under.Get());treat(fl,s,1,under.Get());
+      fr=frame(23,++s);begin(fl,fr);routeTookEye[0]=true;routeTookSeq=s;
+      auto off=outOf(fl,s,0,source.Get());
+      check(off.hr==S_FALSE&&!off.tex,"fix.temporal_aa off: a layer-only claim changes nothing (the ordinary passthrough)");
+      routeTookEye[0]=false;routeTookSeq=0;check(fl.close(fl.context)==S_OK,"floor/off channel close");
     }
   }
 }

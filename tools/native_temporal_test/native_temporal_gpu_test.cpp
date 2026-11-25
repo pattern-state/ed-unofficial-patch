@@ -37,7 +37,8 @@ void checkColor(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Texture2
   bool color=true;for(unsigned channel=0;channel<3;++channel)color&=std::abs(int(pixel[channel])-int((expected>>(channel*8))&255))<=8;
   context->Unmap(staging.Get(),0);require(color,"actual output color stays within 8/255");
 }
-void run(const wchar_t* path,bool dlss){
+void run(const wchar_t* path,const wchar_t* mode){
+  const bool dlss = !wcscmp(mode, L"dlss"), fsr4 = !wcscmp(mode, L"fsr4");
   Watchdog watchdog;
   // Use the proxy's creation export so its config and graphics hooks are
   // initialized exactly as for the game. The isolated directory supplies INI.
@@ -54,7 +55,14 @@ void run(const wchar_t* path,bool dlss){
   require(SUCCEEDED(device->CreateShaderResourceView(sentinel.Get(),nullptr,&srv)),"sentinel SRV");
   auto other=texture(device.Get(),64,64,0xff667788);require(SUCCEEDED(device->CreateUnorderedAccessView(other.Get(),nullptr,&uav)),"sentinel UAV");
   for(unsigned n=1;n<=9;++n){
-    if(n==6){w=432;h=320;for(unsigned e=0;e<2;++e)source[e]=texture(device.Get(),w,h,colors[e]);}
+    if (fsr4) {
+      const unsigned widths[] = {594, 594, 600, 600, 594, 600, 606, 432, 432};
+      const unsigned heights[] = {451, 451, 456, 456, 456, 451, 456, 320, 320};
+      if (w != widths[n-1] || h != heights[n-1]) {
+        w = widths[n-1]; h = heights[n-1];
+        for (unsigned e = 0; e < 2; ++e) source[e] = texture(device.Get(), w, h, colors[e]);
+      }
+    } else if(n==6){w=432;h=320;for(unsigned e=0;e<2;++e)source[e]=texture(device.Get(),w,h,colors[e]);}
     if(n==9)require(client.invalidate()==S_OK,"history invalidation");
     auto g=geometry(n);float shifts[2][2]{};HRESULT begun=E_FAIL;
     std::thread cpu([&]{begun=client.begin(g,n==9?2:1,shifts);for(unsigned e=0;e<2;++e)client.noteProjection(n,e,.025f,50000);});cpu.join();
@@ -66,7 +74,8 @@ void run(const wchar_t* path,bool dlss){
       ComPtr<ID3D11Texture2D> result;vr::VRTextureBounds_t bounds{};
       require(client.treat(n,eye,source[eye].Get(),nullptr,result,bounds)==S_OK,"real temporal evaluation");
       require(result&&result.Get()!=source[eye].Get(),"real owned output");D3D11_TEXTURE2D_DESC d{};result->GetDesc(&d);
-      require(d.Width==(dlss?600:w)&&d.Height==(dlss?456:h),"TAA or DLSS output dimensions");
+      require(d.Width==((dlss || (fsr4 && w <= 600 && h <= 456))?600:w)&&
+              d.Height==((dlss || (fsr4 && w <= 600 && h <= 456))?456:h),"actual temporal output dimensions, including near-native FSR 4");
       require(bounds.uMin==0&&bounds.vMin==0&&bounds.uMax==1&&bounds.vMax==1,"output bounds");
       ComPtr<ID3D11ShaderResourceView> afterSrv;ComPtr<ID3D11UnorderedAccessView> afterUav;
       context->CSGetShaderResources(8,1,&afterSrv);context->CSGetUnorderedAccessViews(6,1,&afterUav);
@@ -77,10 +86,10 @@ void run(const wchar_t* path,bool dlss){
   HRESULT closed=E_FAIL;std::thread cpu([&]{closed=client.close();});cpu.join();require(closed==S_OK,"CPU close without producer callback");
   context->ClearState();context->Flush();
   // Hook-owning graphics DLL remains process lifetime; no unsafe FreeLibrary.
-  std::printf("native_temporal_gpu_test: mode=%s, eyes=18, checks=%u, failures=0\n",dlss?"dlss":"on",checks);
+  std::printf("native_temporal_gpu_test: mode=%s, eyes=18, checks=%u, failures=0\n",fsr4?"fsr4":dlss?"dlss":"on",checks);
 }
 int wmain(int argc,wchar_t** argv){SetErrorMode(3);
   if(argc==2&&!wcscmp(argv[1],L"--dry-run")){std::puts("native_temporal_gpu_test: dry-run (no DLL, runtime, device or files)");return 0;}
-  if(argc!=4||wcscmp(argv[1],L"--self-test")||(wcscmp(argv[3],L"on")&&wcscmp(argv[3],L"dlss")))return 2;
-  try{run(argv[2],!wcscmp(argv[3],L"dlss"));return 0;}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());return 1;}
+  if(argc!=4||wcscmp(argv[1],L"--self-test")||(wcscmp(argv[3],L"on")&&wcscmp(argv[3],L"dlss")&&wcscmp(argv[3],L"fsr4")))return 2;
+  try{run(argv[2],argv[3]);return 0;}catch(const std::exception& e){std::printf("FAIL: %s\n",e.what());return 1;}
 }

@@ -1,6 +1,7 @@
 #include "../common/native_temporal.h"
 
 #include "temporal_pass.h"
+#include "native_temporal_output.h"
 #include "dlss_floor.h"
 #include "ui_layer.h"
 #include "ui_layer_math.h"     // the layer-only door's preflight gaps and its first-eight-reasons log
@@ -548,7 +549,8 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
     return (s->shift[eye][0]||s->shift[eye][1])?E_PENDING:S_FALSE;
   }
   unsigned outW=0,outH=0;
-  if(s->currentSettings.upscale&&w*50<s->recW*49&&h*50<s->recH*49){
+  if(edvr::native_temporal_output::useRecommendedOutput(s->currentSettings.engine,
+       s->currentSettings.upscale,w,h,s->recW,s->recH)){
     outW=s->recW;outH=s->recH;
     // Under NVIDIA's served floor the output follows the input down rather
     // than the pass standing aside (floorOutput above; FSR's ranges differ).

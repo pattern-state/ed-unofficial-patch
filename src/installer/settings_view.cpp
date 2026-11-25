@@ -153,7 +153,7 @@ void updateScrollbar(List* list) {
     list->scroll = std::max(0, std::min(list->scroll, std::max(0, content - page)));
 }
 
-void commitEdit(List* list);
+bool commitEdit(List* list);
 
 void hideEdit(List* list) {
     if (list->edit) ShowWindow(list->edit, SW_HIDE);
@@ -161,7 +161,7 @@ void hideEdit(List* list) {
 }
 
 void scrollTo(List* list, int position) {
-    commitEdit(list);
+    if (!commitEdit(list)) return;
     hideEdit(list);
     RECT client{};
     GetClientRect(list->hwnd, &client);
@@ -348,13 +348,14 @@ RECT recommendLinkRect(const List* list, HDC dc, const RowGeometry& geo,
     return r;
 }
 
-void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& row) {
+void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& row, size_t rowIndex) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
     const RowGeometry geo = geometryFor(list, rowRect);
 
+    const std::string inactive = list->model->inactiveReason(rowIndex);
     RECT labelRect = geo.label;
-    ui::drawText(dc, fromUtf8(row.def->label), labelRect, f.bodyBold, t.text,
+    ui::drawText(dc, fromUtf8(row.def->label), labelRect, f.bodyBold, inactive.empty() ? t.text : t.muted,
                  DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     if (row.def->needsRestart) {
@@ -378,6 +379,17 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
             break;
         }
         case SettingKind::Choice: {
+            if (isVscreenKey(*row.def, "fsr4_quality")) {
+                const RECT box = geo.control;
+                ui::fillRounded(dc, box, dp(list, 5), t.control);
+                ui::strokeRounded(dc, box, dp(list, 5), t.controlBorder);
+                RECT text = box;
+                text.left += dp(list, 8);
+                text.right -= dp(list, 8);
+                ui::drawText(dc, row.shown() + L"  \x25be", text, f.body,
+                    inactive.empty() ? t.text : t.muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                break;
+            }
             std::string onValue;
             if (twoChoiceToggle(row, &onValue, nullptr)) {
                 const RECT box = toggleRect(list, geo);
@@ -427,7 +439,7 @@ void paintRow(const List* list, HDC dc, const RECT& rowRect, const SettingRow& r
     // long quiet half is the half that gets ellipsised.
     const bool isChoice = row.def->kind == SettingKind::Choice;
     const std::wstring link = recommendLink(row);
-    const std::wstring quiet = isChoice ? stateWord(row) : row.helper();
+    const std::wstring quiet = !inactive.empty() ? fromUtf8(inactive) : isChoice ? stateWord(row) : row.helper();
     RECT line = geo.recommended;
     if (!link.empty()) {
         ui::drawText(dc, link, line, f.caption, t.accent, DT_RIGHT | DT_SINGLELINE);
@@ -474,13 +486,21 @@ void paint(List* list) {
             text.top += dp(list, 12);
             ui::drawText(dc, item.title, text, f.heading, t.subtext, DT_LEFT | DT_SINGLELINE);
         } else {
-            paintRow(list, dc, rect, list->model->rows()[item.row]);
+            paintRow(list, dc, rect, list->model->rows()[item.row], item.row);
             RECT line{rect.left + dp(list, kPad), rect.bottom - 1, rect.right - dp(list, kPad),
                       rect.bottom};
             ui::fillRect(dc, line, t.cardBorder);
         }
     }
 
+    if (!list->error.empty()) {
+        RECT error = client;
+        error.top = std::max(client.top, client.bottom - dp(list, 42));
+        ui::fillRect(dc, error, t.cardBg);
+        error.left += dp(list, kPad);
+        error.right -= dp(list, kPad);
+        ui::drawText(dc, fromUtf8(list->error), error, f.caption, t.text, DT_LEFT | DT_WORDBREAK);
+    }
     ui::drawSlimScrollbar(dc, client, dp(list, list->contentHeight), client.bottom, list->scroll,
                           list->dpi, list->dragThumb);
 
@@ -495,34 +515,55 @@ void paint(List* list) {
 // editing
 // ---------------------------------------------------------------------------
 
-void applyValue(List* list, size_t rowIndex, const std::string& value) {
-    if (!list->model) return;
+bool applyValue(List* list, size_t rowIndex, const std::string& value) {
+    if (!list->model) return false;
+    const bool fsr = isVscreenKey(*list->model->rows()[rowIndex].def, "fsr4_quality") || isVscreenKey(*list->model->rows()[rowIndex].def, "fsr4_render_scale");
+    bool saved = false;
     if (!list->model->set(rowIndex, value)) {
         list->error = list->model->lastError();
-        MessageBoxW(GetParent(list->hwnd), fromUtf8(list->error).c_str(), kAppTitle,
+        if (!fsr) MessageBoxW(GetParent(list->hwnd), fromUtf8(list->error).c_str(), kAppTitle,
                     MB_OK | MB_ICONWARNING);
     } else {
+        saved = true;
         list->error.clear();
         // Echoed outside the game folder on every successful write, not just
         // on install: the mirror exists so a game update between now and the
         // next install cannot take today's change with it.
         updateMirrorIni(list->model->gameDir(), list->mirrorDir);
     }
+    rebuildItems(list);
+    updateScrollbar(list);
     InvalidateRect(list->hwnd, nullptr, TRUE);
+    return saved;
 }
 
-void commitEdit(List* list) {
-    if (list->editingRow == SIZE_MAX || !list->edit) return;
+bool commitEdit(List* list) {
+    if (list->editingRow == SIZE_MAX || !list->edit) return true;
+    if (!list->model) return true;
     wchar_t buffer[512]{};
     GetWindowTextW(list->edit, buffer, 512);
     const size_t row = list->editingRow;
-    list->editingRow = SIZE_MAX;  // before applying: the write repaints
-    if (!list->model) return;
+    const bool fsrScale = isVscreenKey(*list->model->rows()[row].def, "fsr4_render_scale");
     std::string wanted;
-    // "30", "30%" and "0.3" all mean the same on a percentage setting, and
-    // anything that is not a number at all is dropped rather than written.
-    if (!list->model->rows()[row].parseTyped(buffer, &wanted)) return;
-    if (wanted != list->model->rows()[row].value) applyValue(list, row, wanted);
+    if (!list->model->rows()[row].parseTyped(buffer, &wanted)) {
+        if (fsrScale) {
+            list->error = "Invalid FSR 4 scale: enter a fraction from 0.33333334 to 1, or Escape to cancel.";
+            InvalidateRect(list->hwnd, nullptr, TRUE);
+            return false;
+        }
+        list->editingRow = SIZE_MAX;
+        return true;
+    }
+    if ((fsrScale || wanted != list->model->rows()[row].value) && !applyValue(list, row, wanted) && fsrScale) return false;
+    // A commit of unchanged text still rechecks an external AA/preset change.
+    if (fsrScale && !list->model->inactiveReason(row).empty()) {
+        list->error = list->model->inactiveReason(row);
+        InvalidateRect(list->hwnd, nullptr, TRUE);
+        return false;
+    }
+    list->editingRow = SIZE_MAX;
+    list->error.clear();
+    return true;
 }
 
 LRESULT CALLBACK editProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR,
@@ -531,21 +572,22 @@ LRESULT CALLBACK editProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
     switch (message) {
         case WM_KEYDOWN:
             if (wparam == VK_RETURN) {
-                commitEdit(list);
+                if (!commitEdit(list)) return 0;
                 hideEdit(list);
                 SetFocus(list->hwnd);
                 return 0;
             }
             if (wparam == VK_ESCAPE) {
                 list->editingRow = SIZE_MAX;
+                list->error.clear();
+                InvalidateRect(list->hwnd, nullptr, TRUE);
                 hideEdit(list);
                 SetFocus(list->hwnd);
                 return 0;
             }
             break;
         case WM_KILLFOCUS:
-            commitEdit(list);
-            hideEdit(list);
+            if (commitEdit(list)) hideEdit(list);
             break;
         case WM_CHAR:
             // Swallow the beep an EDIT makes on Return.
@@ -619,7 +661,7 @@ bool linkHit(List* list, int x, int y, size_t* rowIndex) {
 }
 
 void onClick(List* list, int x, int y) {
-    commitEdit(list);
+    if (!commitEdit(list)) return;
     hideEdit(list);
     if (!list->model) return;
 
@@ -641,6 +683,12 @@ void onClick(List* list, int x, int y) {
         const SettingRow& row = list->model->rows()[item.row];
         const RowGeometry geo = geometryFor(list, rect);
         POINT point{x, y};
+        const std::string inactive = list->model->inactiveReason(item.row);
+        if (!inactive.empty()) {
+            list->error = inactive;
+            InvalidateRect(list->hwnd, nullptr, TRUE);
+            return;
+        }
 
         switch (row.def->kind) {
             case SettingKind::Toggle: {
@@ -649,6 +697,25 @@ void onClick(List* list, int x, int y) {
                 return;
             }
             case SettingKind::Choice: {
+                if (isVscreenKey(*row.def, "fsr4_quality")) {
+                    const RECT box = geo.control;
+                    if (!PtInRect(&box, point)) return;
+                    const std::vector<Choice> choices = row.choices;
+                    const size_t rowIndex = item.row;
+                    HMENU popup = CreatePopupMenu();
+                    if (!popup) { list->error = "Could not open the FSR 4 quality selector."; return; }
+                    for (size_t i = 0; i < choices.size(); ++i)
+                        AppendMenuW(popup, MF_STRING | (choices[i].value == row.value ? MF_CHECKED : 0),
+                            static_cast<UINT_PTR>(i + 1), fromUtf8(choices[i].label).c_str());
+                    POINT anchor{box.left, box.bottom};
+                    ClientToScreen(list->hwnd, &anchor);
+                    const UINT picked = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN,
+                        anchor.x, anchor.y, 0, list->hwnd, nullptr);
+                    DestroyMenu(popup);
+                    if (picked && picked <= choices.size()) applyValue(list, rowIndex, choices[picked - 1].value);
+                    return;
+                }
+
                 std::string onValue, offValue;
                 if (twoChoiceToggle(row, &onValue, &offValue)) {
                     const RECT box = toggleRect(list, geo);
@@ -829,7 +896,7 @@ void settingsListSetModel(HWND hwnd, SettingsModel* model, const std::wstring& m
 void settingsListSetFilter(HWND hwnd, const std::wstring& needle) {
     List* list = listOf(hwnd);
     if (!list) return;
-    commitEdit(list);
+    if (!commitEdit(list)) return;
     hideEdit(list);
     list->filter = needle;
     list->scroll = 0;

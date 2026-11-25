@@ -489,12 +489,12 @@ void panelTable(const std::string& root, const std::string& gen) {
               std::strcmp(kFlatTabNames[kFlatTabCount - 1], "Debug") == 0,
           "the flat panel has exactly three tabs: Performance, Visual, then Debug last");
     {
-        const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"}, {"fix", "render_sharpness"}, {"fix", "ui_quality"},
+        const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"}, {"fix", "fsr4_quality"}, {"fix", "fsr4_render_scale"}, {"fix", "render_sharpness"}, {"fix", "ui_quality"},
                                         {"fix", "hud_antialiasing"}, {"fix", "optimized_stations"}, {"fix", "station_window_distance"}, {"fix", "skip_rooms_behind_doors"}};
-        bool same = kFlatPageRowCount == 8;
-        for (size_t i = 0; same && i < 8; ++i)
+        bool same = kFlatPageRowCount == 10;
+        for (size_t i = 0; same && i < 10; ++i)
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
-        check(same, "the Performance tab has the flat page's eight rows in their order (HUD Anti-Aliasing directly under UI quality, Window 3D distance directly under Optimized stations, "
+        check(same, "the Performance tab has the flat page's ten rows in their order (HUD Anti-Aliasing directly under UI quality, Window 3D distance directly under Optimized stations, "
                     "Skip rooms behind doors under that)");
     }
     check(kFlatVisualRowCount == 6 && std::strcmp(kFlatVisualRows[0].section, "visual") == 0 && std::strcmp(kFlatVisualRows[0].key, "intro_video") == 0 &&
@@ -565,9 +565,11 @@ void panelTable(const std::string& root, const std::string& gen) {
         check(!noVrTick.empty() && !sourceSaysStarGlowBloom(noVrTick), "control: a VR menu that never ticks the Star glow's Bloom is caught");
         check(!noVrConfigure.empty() && !sourceSaysStarGlowBloom(noVrConfigure), "control: a VR menu that never gives the Bloom reader its folders is caught");
     }
-    check(kFlatDebugRowCount == 2 && flatDebugHasRow("advanced", "flat_cpu_timing") && flatDebugHasRow("advanced", "flat_refusal_view") &&
-              std::strcmp(kFlatDebugRows[0].key, "flat_cpu_timing") == 0 && std::strcmp(kFlatDebugRows[1].key, "flat_refusal_view") == 0,
-          "the Debug tab has CPU timing, then the motion source view");
+    check(kFlatDebugRowCount == 3 && flatDebugHasRow("advanced", "flat_cpu_timing") && flatDebugHasRow("advanced", "flat_refusal_view") &&
+              flatDebugHasRow("advanced", "temporal_aa_jitter_phases") &&
+              std::strcmp(kFlatDebugRows[0].key, "flat_cpu_timing") == 0 && std::strcmp(kFlatDebugRows[1].key, "flat_refusal_view") == 0 &&
+              std::strcmp(kFlatDebugRows[2].key, "temporal_aa_jitter_phases") == 0,
+          "the Debug tab retains CPU timing, motion source view and the existing jitter experiment");
     check(!flatPageHasRow("advanced", "flat_cpu_timing") && !flatDebugHasRow("fix", "temporal_aa"),
           "no key is on both tabs");
     check(sourceBuildsFlatDebugFromTable(menuCpp), "menu.cpp builds the Debug tab, after Performance, from kFlatDebugRows and the `menu debug` rows");
@@ -810,7 +812,7 @@ void wrapperContract() {
         ID3D11ShaderResourceView* seenA = nullptr;
         ID3D11ShaderResourceView* seenB = nullptr;
         bool slotsRight = true, stable = true, resultsRight = true;
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < 10; ++i) {
             const bool isB = (i & 1) != 0;
             ID3D11ShaderResourceView* out =
                 flatSharpenView(ctx, isB ? B.srgb.Get() : A.srgb.Get());

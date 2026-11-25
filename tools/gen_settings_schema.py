@@ -156,6 +156,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -349,6 +350,7 @@ class Setting(object):
         self.label = ''
         self.recommended = None
         self.choices = []
+        self.presentation_type = None
         self.restart = False
         self.range_lo = None
         self.range_hi = None
@@ -570,6 +572,8 @@ def apply_annotation(setting, text):
             # window shows the label and writes the value.
             rest = part.split(None, 1)[1] if ' ' in part else ''
             setting.choices = [c.strip() for c in rest.split(',') if c.strip()]
+        elif lower == 'type' or lower.startswith('type '):
+            setting.presentation_type = lower[4:].strip()
         elif lower.startswith('range'):
             # "range 1..600"; see read_range.
             read_range(setting, part)
@@ -781,6 +785,28 @@ def run(root, out, check):
     ini_path = os.path.join(root, 'edvr.ini')
     code, conflicts = readers(os.path.join(root, 'src'))
     settings = parse_ini(ini_path)
+
+    # Presentation overrides require a real reader and explicit finite bounds.
+    for setting in settings:
+        if setting.presentation_type is None:
+            continue
+        key = '%s.%s' % (setting.section, setting.key)
+        entry = code.get(key)
+        valid = (setting.presentation_type == 'number' and entry is not None and
+                 entry[0] in ('text', 'number') and not setting.hotkey and
+                 not setting.choices and not setting.devChoices and
+                 setting.range_lo is not None and setting.range_hi is not None and
+                 setting.range_bad is None)
+        if valid:
+            try:
+                valid = all(math.isfinite(float(bound)) for bound in (setting.range_lo, setting.range_hi))
+            except (ValueError, TypeError, OverflowError):
+                valid = False
+        if not valid:
+            print('gen_settings_schema: ERROR: %s has an incompatible type annotation; type number requires a real string/numeric reader and finite explicit bounds, without hotkey or choices.' % key)
+            return 1
+        kind, default, lo, hi, precision = entry
+        code[key] = ('number', default, lo, hi, 2)
 
     # ---- the enforcement --------------------------------------------------
     if conflicts:
@@ -2067,6 +2093,27 @@ def self_test():
                 dict(flat_reads, **{'d3d11/menu_flat_rows.h': flat_table}), 1)
     expect_in(name, said, 'fix.beta  (menu flat_perf)')
     expect_in(name, said, 'flat_performance')
+    numeric_ini = ('[fix]\n# Input fraction. Live.\n'
+                   '# ui: Input scale | type number | range 0.3333333333333333..1 | live\nalpha = 0.75\n')
+    numeric_reads = {'a.cpp': 'auto value = cfg.getString("fix.alpha", "0.75");\n'}
+    name = 'numeric-string-presentation'
+    said = case(name, numeric_ini, numeric_reads, 0)
+    expect_in(name, said, 'SettingKind::Number, "0.75", "0.75"')
+    expect_in(name, said, '"0.3333333333333333", "1", 2,')
+    said = case('unannotated-string-remains-text', numeric_ini.replace(' | type number', ''), numeric_reads, 0)
+    expect_in('unannotated-string-remains-text', said, 'SettingKind::Text')
+    for label, annotation, reader in (
+        ('unknown-type', 'type decimal | range 0.3333333333333333..1', numeric_reads),
+        ('missing-type', 'type | range 0.3333333333333333..1', numeric_reads),
+        ('missing-reader', 'type number | range 0.3333333333333333..1', {'a.cpp': ''}),
+        ('boolean-reader', 'type number | range 0..1', {'a.cpp': 'auto value = cfg.getBool("fix.alpha", false);'}),
+        ('hotkey-conflict', 'type number | hotkey | range 0..1', numeric_reads),
+        ('choice-conflict', 'type number | choices 0.5, 1 | range 0..1', numeric_reads),
+        ('missing-bounds', 'type number', numeric_reads),
+        ('nan-bound', 'type number | range nan..1', numeric_reads),
+        ('infinite-bound', 'type number | range 0..inf', numeric_reads),
+    ):
+        case('numeric-' + label, numeric_ini.replace('type number | range 0.3333333333333333..1', annotation), reader, 1)
     shutil.rmtree(base, ignore_errors=True)
     if failures:
         print('gen_settings_schema: self-test FAILED')

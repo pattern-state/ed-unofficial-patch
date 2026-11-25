@@ -107,6 +107,8 @@ public:
     // comments and every other value exactly as they were. The game re-reads the
     // file within about a second, so this IS the apply step.
     bool set(size_t index, const std::string& value);
+    // Empty means editable; the reason is also shown on an inactive row.
+    std::string inactiveReason(size_t index) const;
 
     const std::string& lastError() const { return m_error; }
 

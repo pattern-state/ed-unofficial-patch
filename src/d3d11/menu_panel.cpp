@@ -249,16 +249,9 @@ int measureWrapped(const std::wstring& s, int widthPx, int emPx) {
     return r.bottom - r.top;
 }
 
-// The footer's box is ALWAYS two lines tall. The model composes a legend
-// line and, when there is one, a status line after a '\n' (menu_keys.h,
-// menuComposeFooter): the pending count, a shared-keys warning. Sizing the
-// box to the lines present would make the whole panel grow and shrink by
-// 1.6 cap as a warning came and went, under a head that had just aimed at
-// a row; the box keeps its two lines and the second is simply empty. Each
-// line is its own single-line op in its own half of the box: MEASURED
-// 2026-09-11 that DT_END_ELLIPSIS on a multi-line DrawTextW ellipsises
-// only the LAST line, so a two-line footer drawn as one op had its first
-// line clipped at the rect's edge with nothing to say so.
+// Controls reserve two lines. A flat version tag shares the second line only
+// when the measured text fits; a long development version gets a third line.
+// VR carries no version tag and retains its existing two-line geometry.
 constexpr int kFooterLines = 2;
 
 // Lay the content out into ops and line rectangles. All sizes derive from
@@ -282,7 +275,16 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
     const int rowPitch = c.compact ? cap * 17 / 10 : cap * 2;
     const int tabH = c.toast ? 0 : cap * 24 / 10;
     const int hintH = c.toast ? 0 : cap * 34 / 10;   // two lines of hint
-    const int footH = c.toast ? 0 : kFooterLines * cap * 16 / 10;
+    const char* secondFooter = std::strchr(c.footer, '\n');
+    const int footerWidth = cardW - 2 * pad;
+    const int tagMeasured = c.footerTag[0] ? menuPanelMeasureLine(c.footerTag, cap) : 0;
+    const int tagWidth = std::min(tagMeasured, std::max(0, footerWidth));
+    const int tagGap = cap / 2;
+    const int secondWidth = tagWidth && secondFooter ? menuPanelMeasureLine(secondFooter + 1, cap) : 0;
+    // A long development version gets its own line rather than obscuring controls.
+    const bool tagOwnLine = tagWidth && secondFooter && secondWidth + tagGap + tagMeasured > footerWidth;
+    const int footerLines = kFooterLines + (tagOwnLine ? 1 : 0);
+    const int footH = c.toast ? 0 : footerLines * cap * 16 / 10;
     const int graphOneH = cap * 32 / 10;
     const int graphH = c.graphCount * graphOneH;
     const int rows = c.lineCount;
@@ -623,7 +625,7 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
             // ellipsises every line -- and a one-line footer sits where
             // the first line of a two-line one does, rather than centred
             // in the taller box.
-            const int lineH = footH / kFooterLines;
+            const int lineH = footH / footerLines;
             const char* line = c.footer;
             int n = 0;
             while (line && *line && n < kFooterLines) {
@@ -631,7 +633,8 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                 Op f;
                 f.text = true;
                 f.str = widen((nl ? std::string(line, static_cast<size_t>(nl - line)) : std::string(line)).c_str());
-                f.rect = {pad, y + n * lineH, cardW - pad, y + (n + 1) * lineH};
+                const int right = n == 1 && tagWidth && !tagOwnLine ? cardW - pad - tagWidth - tagGap : cardW - pad;
+                f.rect = {pad, y + n * lineH, right, y + (n + 1) * lineH};
                 f.align = DT_LEFT;
                 f.font = Font::Small;
                 f.rgb = kFooter;
@@ -645,14 +648,15 @@ void layout(const MenuContent& c, std::vector<Op>& ops, std::vector<LineRect>& l
                 Op v;
                 v.text = true;
                 v.str = widen(c.footerTag);
-                v.rect = {pad, y + lineH, cardW - pad, y + 2 * lineH};
+                const int tagLine = tagOwnLine ? kFooterLines : 1;
+                v.rect = {cardW - pad - tagWidth, y + tagLine * lineH, cardW - pad, y + (tagLine + 1) * lineH};
                 v.align = DT_RIGHT;
                 v.font = Font::Small;
                 v.rgb = kFooter;
                 ops.push_back(v);
             }
             if (outFootRect) *outFootRect = {pad, y, cardW - pad, y + footH};
-            if (outFootLines) *outFootLines = n;
+            if (outFootLines) *outFootLines = n + (tagOwnLine ? 1 : 0);
         }
     }
 
@@ -1630,6 +1634,30 @@ bool menuPanelWorkerReadyForTest() {
 // reserves the hint box) and that it reserves nothing on a page that does
 // not. The raster's aspect is a pure function of this height, so a constant
 // height here is a constant on-screen card size (halfH = halfW * aspect).
+bool menuPanelRasterForTest(const MenuContent& c, int* height) {
+    Raster raster;
+    if (!rasterise(c, raster)) return false;
+    if (height) *height = raster.h;
+    return true;
+}
+bool menuPanelFooterRectsForTest(const MenuContent& c, int text[4], int tag[4]) {
+    std::vector<Op> ops;
+    std::vector<LineRect> lines;
+    int height = 0;
+    layout(c, ops, lines, &height, 0, nullptr);
+    const char* second = std::strchr(c.footer, '\n');
+    if (!second || !c.footerTag[0]) return false;
+    const std::wstring wanted = widen(second + 1), version = widen(c.footerTag);
+    bool haveText = false, haveTag = false;
+    for (const Op& op : ops) {
+        if (!op.text || op.font != Font::Small) continue;
+        int* out = nullptr;
+        if (op.str == wanted && op.align == DT_LEFT) { out = text; haveText = true; }
+        if (op.str == version && op.align == DT_RIGHT) { out = tag; haveTag = true; }
+        if (out) { out[0] = op.rect.left; out[1] = op.rect.top; out[2] = op.rect.right; out[3] = op.rect.bottom; }
+    }
+    return haveText && haveTag;
+}
 int menuPanelLayoutHeightForTest(const MenuContent& c) {
     std::vector<Op> ops;
     std::vector<LineRect> lines;

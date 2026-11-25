@@ -2752,7 +2752,8 @@ void testFlatWarningWiring() {
     const std::string bundleCpp = slurp("src/installer/logbundle.cpp");
     const std::string standdownH = slurp("src/d3d11/flat_standdown.h");
     const std::string settingsH = slurp("src/d3d11/flat_elite_settings.h");
-    check(!menuCpp.empty() && !runtimeCpp.empty() && !bundleCpp.empty() && !standdownH.empty() && !settingsH.empty(),
+    const std::string qualityH = slurp("src/d3d11/menu_fsr4_quality.h");
+    check(!menuCpp.empty() && !runtimeCpp.empty() && !bundleCpp.empty() && !standdownH.empty() && !settingsH.empty() && !qualityH.empty(),
           "the menu, runtime, stand-down policy, settings header and log bundler sources are readable from the repo root");
     auto count = [](const std::string& text, const std::string& needle) {
         unsigned n = 0;
@@ -2785,8 +2786,18 @@ void testFlatWarningWiring() {
         {&menuCpp, "if (runtimeFlatProfile() && s.flatWarnActive) {", 1, "the panel draws the warning only while it is active"},
         {&menuCpp, "if (c.lineCount < kMenuMaxLines) c.lines[c.lineCount++].style = kMenuNote;", 3,
          "the Star glow's Bloom note above it, the warning, and the wrapper note after it, are note lines below the rows"},
-        {&menuCpp, "FlatWarnRuler ruler{c.capPx * 8 / 7};", 3,
-         "wrapped with the panel's own ruler at the note face's em (the Bloom note, the flat warning and the wrapper note: no VR note takes a line)"},
+        {&menuCpp, "FlatWarnRuler ruler{c.capPx * 8 / 7};", 4,
+         "Bloom, flat warning, wrapper and Status details use the panel's note-face ruler"},
+        {&menuCpp, "FlatWarnRuler qualityRuler{c.capPx * 8 / 7};", 1,
+         "the actual quality compositor receives the same measured note-face ruler"},
+        {&menuCpp, "menuComposeQualityStatus(c, qualityStatus, &flatWarnMeasure, &qualityRuler);", 1,
+         "the tested production quality compositor is wired into the real menu"},
+        {&menuCpp, "return menuPanelMeasureLine(text, static_cast<FlatWarnRuler*>(context)->emPx);", 1,
+         "the note ruler measures actual panel text instead of estimating character widths"},
+        {&qualityH, "if (view.flat && note.count > kMenuRenderQualityLines) {", 1,
+         "the FSR note falls back before exceeding its bounded flat status budget"},
+        {&qualityH, "const int limit = view.flat ? kMenuRenderQualityLines : 2;", 1,
+         "the note append loop uses the explicit flat status limit"},
         {&menuCpp, "flatWarningTick(now);", 1, "the flat tick runs the warning"},
         {&menuCpp, "s.flatSettingsForce = true;", 1, "Elite's files are looked at when the panel opens"},
         {&menuCpp, "s.flatSettings.setFolder(flatEliteGraphicsFolder());", 1, "from %LOCALAPPDATA%, resolved once"},
@@ -2814,6 +2825,24 @@ void testFlatWarningWiring() {
             without.erase(at, std::strlen(pin.needle));
         check(count(without, pin.needle) == 0, "warning wiring control: a source with the line removed no longer contains it");
     }
+    // VR reuses its existing hint box; even though status is measured, none of its note lines are appended.
+    const auto vrStatusKeepsRows = [](const std::string& text) {
+        const size_t quality = text.find("inline void menuComposeQualityStatus(");
+        const size_t vr = quality == std::string::npos ? std::string::npos : text.find("if (!view.flat) {", quality);
+        const size_t append = vr == std::string::npos ? std::string::npos : text.find("const int limit =", vr);
+        if (vr == std::string::npos || append == std::string::npos) return false;
+        const std::string block = text.substr(vr, append - vr);
+        return block.find("snprintf(c.hint,") != std::string::npos && block.find("note = {};") != std::string::npos &&
+               block.find("c.lines[") == std::string::npos;
+    };
+    check(vrStatusKeepsRows(qualityH), "VR FSR status uses the reserved hint box and clears all measured note rows before append");
+    std::string vrNoteRows = qualityH;
+    const size_t vrQuality = vrNoteRows.find("inline void menuComposeQualityStatus(");
+    const size_t vrBranch = vrQuality == std::string::npos ? std::string::npos : vrNoteRows.find("if (!view.flat) {", vrQuality);
+    const size_t clearNotes = vrBranch == std::string::npos ? std::string::npos : vrNoteRows.find("note = {};", vrBranch);
+    if (clearNotes != std::string::npos) vrNoteRows.erase(clearNotes, std::strlen("note = {};"));
+    check(vrNoteRows != qualityH && !vrStatusKeepsRows(vrNoteRows),
+          "(control) omitting the VR note clear violates the unchanged visible-row invariant");
     // ORDER of the hold on a changed cause. It is asked after the key is computed and before the comparison that leaves the tick:
     // asked on every tick, so a cause that comes back to the one on show drops the change that was waiting, and a held change
     // returns before the switch, so it neither replaces what is on show nor is logged as changed. Two controls: the same text with

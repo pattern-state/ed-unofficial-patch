@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include "../../src/d3d11/flat_elite_settings.h"
+#include "../../src/d3d11/menu_panel.h"
 #include "../../src/d3d11/menu_flat_rows.h"   // kFlatPageRowCount: the rows the warning shares the card with
 #include "../../src/d3d11/flat_hdr_route.h"   // flatHdrSupersamplingAdvice: the key and sizes that decide the extra paragraph
 #include "../../src/d3d11/flat_standdown.h"   // kFlatStandDownProbeMs: the hold is measured against the probe cadence
@@ -557,7 +558,8 @@ inline int flatEliteSettingsTests() {
                     if (elite_settings_test::ruler(w.line[i], nullptr) > elite_settings_test::kPanelWidthPx) fits = false;
             }
         expect(fits, "wrapped to the panel's width every variant fits the lines it has");
-        expect(static_cast<int>(kFlatPageRowCount) + 1 + FlatSettingsWarning::kMaxLines <= 19, "the flat page's rows, a blank line and a full warning fit the card's 19 lines");
+        expect(static_cast<int>(kFlatPageRowCount) + 1 + FlatSettingsWarning::kMaxLines + kMenuRenderQualityLines <= kMenuMaxLines,
+               "flat rows, separator, full warning and bounded render-quality status fit shared raster storage");
 
         // The key moves with every condition and with the sizes the words name, so the panel and the log update live as Elite's
         // resolution or supersampling changes; with no cause it is what it was.

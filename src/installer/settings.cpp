@@ -1,8 +1,10 @@
 #include "settings.h"
 
 #include <windows.h>
+#include <cstring>
 
 #include "detect.h"
+#include "../common/fsr4_quality.h"
 #include "../common/flat_profile_keys.h"
 #include "../common/iniedit.h"
 #include "state.h"
@@ -101,6 +103,10 @@ bool sameValue(const SettingDef& def, const std::string& a, const std::string& b
 
 // The file's text, in the terms the window uses.
 std::wstring showValue(const SettingDef& def, const std::string& fileValue) {
+    if (std::strcmp(def.section, "fix") == 0 && std::strcmp(def.key, "fsr4_quality") == 0) {
+        for (const Choice& choice : splitChoices(def.choices))
+            if (choice.value == fileValue) return fromUtf8(choice.label);
+    }
     if (!def.percent) return fromUtf8(fileValue);
     double value = 0;
     if (!asNumber(fileValue, &value)) return fromUtf8(fileValue);
@@ -120,6 +126,12 @@ std::wstring SettingRow::shownRecommended() const {
 bool SettingRow::parseTyped(const std::wstring& typed, std::string* fileValue) const {
     if (!def) return false;
     const std::string text = toUtf8(typed);
+    if (std::strcmp(def->section, "fix") == 0 && std::strcmp(def->key, "fsr4_render_scale") == 0) {
+        float scale = 0;
+        if (!fsr4_quality::parseCustomScale(text, fsr4_quality::InputMode::Typed, scale)) return false;
+        *fileValue = fsr4_quality::formatCustomScale(scale);
+        return true;
+    }
     if (def->kind == SettingKind::Text) {
         *fileValue = text;
         return true;
@@ -222,7 +234,21 @@ void SettingsModel::refreshRows() {
     }
 }
 
-bool SettingsModel::set(size_t index, const std::string& value) {
+namespace {
+std::string fsrInactiveReason(const std::string& text, const std::string& dotted) {
+    const char* reason = fsr4_quality::editInactiveReason(dotted,
+        iniValue(text, "fix.temporal_aa", "off"), iniValue(text, "fix.fsr4_quality", "game"));
+    return reason ? reason : "";
+}
+}
+std::string SettingsModel::inactiveReason(size_t index) const {
+    if (index >= m_rows.size()) return "Setting is unavailable.";
+    const SettingDef& def = *m_rows[index].def;
+    return fsrInactiveReason(m_text, std::string(def.section) + "." + def.key);
+}
+
+bool SettingsModel::set(size_t index, const std::string& requestedValue) {
+    std::string value = requestedValue;  // callers may pass a row value; refreshRows replaces those strings
     if (index >= m_rows.size()) return false;
     const SettingDef& def = *m_rows[index].def;
     const std::string dotted = std::string(def.section) + "." + def.key;
@@ -235,7 +261,24 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     // file was gone.
     const std::string leaf = toUtf8(leafOf(m_iniPath));
     bool fromShared = false;
-    m_text = currentText(&fromShared);
+    const std::string fresh = currentText(&fromShared);
+    if (fresh.empty()) {
+        m_error = fileExists(m_iniPath)
+            ? "Could not read " + leaf + "; existing settings have not been changed."
+            : leaf + " is not there yet -- install ED-UP into this folder first.";
+        return false;
+    }
+    m_text = fresh;
+    refreshRows();
+    std::string canonical;
+    const char* reason = nullptr;
+    if (!fsr4_quality::validateEdit(dotted, value,
+        iniValue(m_text, "fix.temporal_aa", "off"), iniValue(m_text, "fix.fsr4_quality", "game"),
+        iniValue(m_text, "fix.fsr4_render_scale", "0.75"), canonical, &reason)) {
+        m_error = reason ? reason : "Setting cannot be changed.";
+        return false;
+    }
+    value = canonical;
 
     // The merge engine, used for one value: merging a document with itself is a
     // no-op (installer_test proves it), so the only change is the forced value
@@ -243,10 +286,6 @@ bool SettingsModel::set(size_t index, const std::string& value) {
     // it was an expert default, with the file's layout and every comment
     // untouched. Exactly what a careful hand edit would do.
     std::string source = m_text;
-    if (source.empty()) {
-        m_error = leaf + " is not there yet -- install ED-UP into this folder first.";
-        return false;
-    }
     // One copy of the file as it was when this window opened, before the first
     // change of the session. The install path backs the settings file up;
     // changing a setting did not, and a settings screen is exactly where

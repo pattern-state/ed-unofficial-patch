@@ -24,6 +24,8 @@ inline bool flatProfileReadsKey(const char* key) {
         std::strcmp(key, "advanced.flat_cpu_timing") == 0 ||
         std::strcmp(key, "hotkey.menu") == 0 ||
         std::strcmp(key, "fix.temporal_aa_model") == 0 ||
+        std::strcmp(key, "fix.fsr4_quality") == 0 ||
+        std::strcmp(key, "fix.fsr4_render_scale") == 0 ||
         std::strcmp(key, "hotkey.dump_draws") == 0 ||
         // TEMPORARY (GPU pass profile, 2026-10-12): the flat profile reads the same key. Remove with the arc.
         std::strcmp(key, "hotkey.gpu_pass_profile") == 0 ||

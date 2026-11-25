@@ -45,6 +45,9 @@
 #include "input_gate.h"
 #include "joy_watch.h"
 #include "menu_edit_hold.h"
+#include "menu_fsr4_quality.h"
+#include "game_render_scale.h"
+#include "game_render_scale_status.h"
 #include "menu_write.h"
 #include "menu_aim_prompt.h"    // F177: the aiming choice at start: the page's words, the trigger, the writes
 #include "menu_flat_rows.h"
@@ -304,6 +307,8 @@ struct State {
     int         editEntry = -1;      // an entry index on the current page, or -1
     int         editDef = -1;
     std::string editBuf;
+    MenuFsr4Feedback fsrEdit;
+    uint64_t renderQualityRevision = 0;
     bool        editBad = false;     // the buffer is out of bounds or not a number
     KeyRepeat   editKeys[kEditKeyCount];
 
@@ -483,6 +488,34 @@ bool isSharpenRow(const MenuRowDef& d) {
 bool sharpenRowDisabled() {
     return flatSharpenRowDim(runtimeFlatProfile(),
                              temporalModeEnabled(Config::get().requestedTemporalMode()));
+}
+
+// Row values include the immediately selected choice while its captured write is queued.
+std::string fsr4RowValue(const char* key, const char* fallback) {
+    for (int i = 0; i < kRowDefCount; ++i)
+        if (strcmp(kMenuRows[i].section, "fix") == 0 && strcmp(kMenuRows[i].key, key) == 0)
+            return g_rows[i].value;
+    return Config::get().getString((std::string("fix.") + key).c_str(), fallback);
+}
+
+const char* fsr4InactiveReason(const MenuRowDef& d) {
+    return fsr4_quality::editInactiveReason(dottedOf(d), Config::get().requestedTemporalMode(),
+                                           fsr4RowValue("fsr4_quality", "game"));
+}
+
+void refuseFsr4Edit(const char* why) {
+    g_s.fsrEdit.refused = true;
+    g_s.fsrEdit.reason = why;
+    g_s.lastWrite = std::string("not written: ") + why;
+    g_s.contentDirty = true;
+}
+
+bool prepareFsr4Change(const MenuRowDef& d, const std::string& value, std::string& canonical) {
+    if (menuPrepareFsr4Edit(dottedOf(d), value, Config::get().requestedTemporalMode(),
+                            fsr4RowValue("fsr4_quality", "game"), fsr4RowValue("fsr4_render_scale", "0.75"),
+                            g_s.fsrEdit, canonical)) return true;
+    refuseFsr4Edit(g_s.fsrEdit.reason.c_str());
+    return false;
 }
 
 // fix.hud_antialiasing (the HUD Anti-Aliasing row, 2026-10-24 on the flat panel; on VR's Performance page too since 2026-11-03). It smooths the UI layer, which is
@@ -1154,8 +1187,8 @@ constexpr int kFlatWarnHeldLogMax = 8;
 
 // The flat page is the rows of menu_flat_rows.h and nothing else; a blank line and a full warning make up the rest of
 // the card. (The wrapper note, when there is one, takes what is left.)
-static_assert(static_cast<int>(kFlatPageRowCount) + 1 + FlatSettingsWarning::kMaxLines <= kMenuMaxLines,
-              "the flat page's rows, a blank line and a full settings warning fit the card's lines");
+static_assert(static_cast<int>(kFlatPageRowCount) + 1 + FlatSettingsWarning::kMaxLines + kMenuRenderQualityLines <= kMenuMaxLines,
+              "flat rows, separator, full warning and bounded quality status fit the card's storage");
 
 // The selected mode as the panel names it on its Anti-aliasing row.
 std::string flatModeLabel() {
@@ -1274,22 +1307,6 @@ void starGlowBloomMenuOpened() {
 // ---------------------------------------------------------------------------
 // The ini write (docs/settings-menu.md, "Persistence")
 
-bool readWhole(const std::wstring& path, std::string* out) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    const DWORD size = GetFileSize(f, nullptr);
-    if (size == INVALID_FILE_SIZE || size > (4u << 20)) {
-        CloseHandle(f);
-        return false;
-    }
-    out->resize(size);
-    DWORD got = 0;
-    const BOOL ok = size == 0 || ReadFile(f, &(*out)[0], size, &got, nullptr);
-    CloseHandle(f);
-    return ok && got == size;
-}
-
 std::string utf8Of(const std::wstring& w) {
     if (w.empty()) return std::string();
     const int need = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
@@ -1362,77 +1379,38 @@ std::wstring mirrorDir() {
     return dirExistsW(made) ? made : std::wstring();
 }
 
-bool g_backedUp = false;
 bool g_mirrorNoted = false;
 bool g_mirrorFailNoted = false;
-
-bool menuIniWritePairs(const std::vector<std::pair<std::string, std::string>>& pairs, std::string* err) {
-    const std::wstring path = Config::get().path();
-    // The file this process reads and this write replaces: edvr-flat.ini under the
-    // flat profile, edvr.ini otherwise (Config::iniName names it for the messages).
-    // Its own name, both for the safety copies below and for what a failure says.
-    const std::string fileName = Config::get().iniName();
-    const size_t leafAt = path.find_last_of(L"\\/");
-    const std::wstring leaf = leafAt == std::wstring::npos ? path : path.substr(leafAt + 1);
-    std::string source;
-    // Re-read before every write, the settings window's 2026-08-28 lesson:
-    // the file on disk is the source, never a copy cached when the panel
-    // opened.
-    if (!readWhole(path, &source) || source.empty()) {
-        *err = fileName + " could not be read";
-        return false;
-    }
-    if (!g_backedUp) {
-        g_backedUp = true;   // tried once; a failure must not block editing
+struct MenuWriteSideEffects : SettingsWriteSideEffects {
+    std::vector<std::wstring> backedUp;
+    void backup(const SettingsWriteTarget& target) override {
+        if (std::find(backedUp.begin(), backedUp.end(), target.path) != backedUp.end()) return;
+        backedUp.push_back(target.path); // tried once per destination; failure does not block editing
         const std::wstring root = executableDirectory() + L"\\edvr_backup";
         if (!dirExistsW(root)) CreateDirectoryW(root.c_str(), nullptr);
         const std::wstring dir = root + L"\\menu-" + stampName();
-        if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
-            // Named for the file copied: the flat profile's settings are not an edvr.ini,
-            // and a copy called that could be restored over the VR profile's.
-            CopyFileW(path.c_str(), (dir + L"\\" + leaf).c_str(), FALSE);
-        }
+        if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS)
+            CopyFileW(target.path.c_str(), (dir + L"\\" + target.leaf).c_str(), TRUE);
     }
-    MergeReport report;
-    const std::string updated = mergeIni(source, source, &source, pairs, &report);
-    // Atomic, through the one writer iniedit owns (the whole new file beside the
-    // old one, flushed, then one replace that is tried again while a reader has
-    // the file for a moment), so config.cpp's size check never meets half a save
-    // and a reload that lands between two writes cannot fail the second.
-    std::wstring why;
-    if (!writeFileAtomic(path, updated, &why)) {
-        *err = fileName + ": " + utf8Of(why);
-        return false;
-    }
-    // The mirror of last resort, refreshed so an update that wipes the
-    // folder cannot lose an evening's tuning. A change made just now, not a
-    // checkpoint: it replaces the newest copy in place and leaves the older
-    // generations the installer keeps (edvr.ini.1, edvr.ini.2) alone. Named for
-    // the file actually written, so the flat profile's edvr-flat.ini lands in
-    // the mirror's edvr-flat.ini rather than over the VR profile's edvr.ini.
-    const std::wstring mdir = mirrorDir();
-    if (!mdir.empty()) {
-        std::wstring mirrorWhy;
-        if (writeGenerations(mdir, leaf, updated, false, &mirrorWhy)) {
+    void mirror(const SettingsWriteTarget& target, const std::string& updated) override {
+        const std::wstring mdir = mirrorDir();
+        if (mdir.empty()) return;
+        std::wstring why;
+        if (writeGenerations(mdir, target.leaf, updated, false, &why)) {
             if (!g_mirrorNoted) {
                 g_mirrorNoted = true;
-                Log::get().note("menu: each write is mirrored to %s, the installer's copy outside "
-                                "the game folder.",
-                                utf8Of(mdir).c_str());
+                Log::get().note("menu: each write is mirrored to %s, the installer's copy outside the game folder.", utf8Of(mdir).c_str());
             }
         } else if (!g_mirrorFailNoted) {
-            // Once: a mirror that cannot be written fails every write the same
-            // way, and the menu never fails a settings change over its safety net.
             g_mirrorFailNoted = true;
-            Log::get().note("menu: the mirror copy in %s could not be written: %s.",
-                            utf8Of(mdir).c_str(), utf8Of(mirrorWhy).c_str());
+            Log::get().note("menu: the mirror copy in %s could not be written: %s.", utf8Of(mdir).c_str(), utf8Of(why).c_str());
         }
     }
-    return true;
-}
+} g_writeSideEffects;
 
-bool menuIniWrite(const std::string& dotted, const std::string& value, std::string* err) {
-    return menuIniWritePairs({{dotted, value}}, err);
+bool menuIniWritePairs(const SettingsWriteTarget& target,
+    const std::vector<std::pair<std::string, std::string>>& pairs, std::string* err) {
+    return writeSettingsPairs(target, pairs, g_writeSideEffects, err);
 }
 
 // THE WRITE RUNS OFF THE FRAME THREAD. The first build did the read, the
@@ -1472,7 +1450,7 @@ void writerMain() {
         for (size_t i = 0; i < jobs.size(); ++i) {
             bool later = false;
             for (size_t j = i + 1; j < jobs.size(); ++j) {
-                if (jobs[i].pairs.empty() && jobs[j].pairs.empty() && jobs[j].dotted == jobs[i].dotted) {
+                if (menuWritesCoalesce(jobs[i], jobs[j])) {
                     later = true;
                     break;
                 }
@@ -1482,7 +1460,7 @@ void writerMain() {
         for (const WriteJob& job : last) {
             WriteDone d = runMenuWrite(job, [](const WriteJob& write, std::string* err) {
                 bool ok = false;
-                guarded("menu/write", [&] { ok = write.pairs.empty() ? menuIniWrite(write.dotted, write.value, err) : menuIniWritePairs(write.pairs, err); });
+                guarded("menu/write", [&] { ok = write.pairs.empty() ? menuIniWritePairs(write.target, {{write.dotted, write.value}}, err) : menuIniWritePairs(write.target, write.pairs, err); });
                 return ok;
             });
             std::lock_guard<std::mutex> lock(g_writer.m);
@@ -1491,7 +1469,9 @@ void writerMain() {
     }
 }
 
-void enqueueWrite(const WriteJob& job) {
+void enqueueWrite(const WriteJob& original) {
+    WriteJob job = original;
+    if (!job.target.bound()) job.target = Config::get().captureWriteTarget();
     std::lock_guard<std::mutex> lock(g_writer.m);
     if (!g_writer.started) {
         g_writer.started = true;
@@ -2182,6 +2162,26 @@ void buildStatus(MenuContent& c) {
         statusLine(c, "Waiting for a restart", buf);
     }
     statusLine(c, "Last write", g_s.lastWrite.empty() ? "none this session" : g_s.lastWrite.c_str());
+    if (runtimeFlatProfile()) {
+        const auto snapshot = gameRenderScaleSnapshot();
+        FlatWarnRuler ruler{c.capPx * 8 / 7};
+        FlatSettingsWarning detail;
+        Fsr4DispatchStatus observed[3];
+        for (unsigned slot = 0; slot < 3; ++slot) observed[slot] = fsr4DispatchStatus(slot);
+        const std::string fullStatus = renderScaleStatus(snapshot, observed);
+        flatWrapWarning(fullStatus, c.cardPx - 2 * (c.capPx * 8 / 10), &flatWarnMeasure, &ruler, &detail);
+        size_t represented = 0;
+        for (int i = 0; i < detail.count; ++i) represented += strlen(detail.line[i]) + 1;
+        const int available = kMenuMaxLines - c.lineCount;
+        if (detail.count > available) detail.count = available;
+        if (detail.count > 0 && (represented < fullStatus.size() || detail.count == available))
+            snprintf(detail.line[detail.count - 1], sizeof(detail.line[0]), "Further render quality details are recorded in the session log.");
+        for (int i = 0; i < detail.count && c.lineCount < kMenuMaxLines; ++i) {
+            MenuLine& line = c.lines[c.lineCount++];
+            strncpy(line.left, detail.line[i], sizeof(line.left) - 1);
+            line.style = kMenuNote;
+        }
+    }
 }
 
 // The Monitor page: fpsVR's readout from perf_monitor.h, and the frame-time
@@ -2452,6 +2452,7 @@ void buildContent(MenuContent& c) {
                 ppn::formatStatusHint(c.hint, sizeof(c.hint));
         }
     } else {
+        if (runtimeFlatProfile()) c.compact = true;
         // The tooltip waits for the look or the hand to settle on one row:
         // it is an explanation for someone who has stopped, not something
         // to flick past.
@@ -2567,7 +2568,9 @@ void buildContent(MenuContent& c) {
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
             const bool windowDistanceRow = isStationWindowDistanceRow(d);
             const bool doorsRow = isRoomsBehindDoorsRow(d);
-            const bool dim = (dlssRow && dlssPresetDisabled()) ||
+            const bool fsrQualityRow = menuFsr4Key(dottedOf(d));
+            const char* fsrInactive = fsrQualityRow ? fsr4InactiveReason(d) : nullptr;
+            const bool dim = fsrInactive || (dlssRow && dlssPresetDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
                              (hudAaRow && hudAntiAliasingRowDisabled()) ||
                              (glassDirtRow && cockpitGlassDirtRowDisabled()) ||
@@ -2662,9 +2665,6 @@ void buildContent(MenuContent& c) {
             // why FSR 4 is unavailable. The tooltip carries it whole; this box holds what fits.
             const bool fsr4Selected = strcmp(d.section, "fix") == 0 && strcmp(d.key, "temporal_aa") == 0 &&
                                       _stricmp(r.value.c_str(), "fsr4") == 0;
-            if (hi && fsr4Selected) {
-                snprintf(c.hint, sizeof(c.hint), "%s", fsr4StatusLine().c_str());
-            }
             if (hi && isVscreenResolutionRow(d)) {
                 // announce=false: this runs every frame the row is highlighted,
                 // not once at startup, so the resolver must stay silent here.
@@ -2698,7 +2698,8 @@ void buildContent(MenuContent& c) {
                 // to change a value needs -- its range, its shipped value,
                 // when it applies, and which key does it.
                 std::string body;
-                if (fsr4Selected) body += fsr4StatusLine() + ".\n";
+                if (fsr4Selected || fsrQualityRow) body += gameRenderScaleStatus() + "\n";
+                if (fsr4Selected) body += fsr4StatusLine(runtimeFlatProfile()) + ".\n";
                 if (openxrScaleRow) {
                     body += openxrResolutionFacts();
                 } else if (isVscreenResolutionRow(d) && d.lo[0] && d.hi[0]) {
@@ -2786,6 +2787,30 @@ void buildContent(MenuContent& c) {
                 body += std::string("\n\n") + (d.detail[0] ? d.detail : d.hint);
                 strncpy(c.popup, body.c_str(), sizeof(c.popup) - 1);
             }
+        }
+        bool qualityPage = false;
+        for (const Entry& entry : p.entries)
+            if (entry.kind == EntryKind::Setting && menuFsr4Key(dottedOf(kMenuRows[entry.def]))) qualityPage = true;
+        if (qualityPage || s.fsrEdit.refused) {
+            MenuQualityStatus qualityStatus;
+            qualityStatus.controller = gameRenderScaleSnapshot();
+            for (unsigned slot = 0; slot < 3; ++slot) qualityStatus.observed[slot] = fsr4DispatchStatus(slot);
+            qualityStatus.flat = runtimeFlatProfile();
+            qualityStatus.qualityPage = qualityPage;
+            qualityStatus.refusal = s.fsrEdit.refused ? s.fsrEdit.reason : "";
+            if (p.highlight >= 0 && p.highlight < static_cast<int>(p.entries.size())) {
+                const Entry& highlighted = p.entries[p.highlight];
+                if (highlighted.kind == EntryKind::Setting) {
+                    const auto& def = kMenuRows[highlighted.def];
+                    qualityStatus.qualityHighlighted = menuFsr4Key(dottedOf(def));
+                    qualityStatus.aaHighlighted = strcmp(def.section, "fix") == 0 && strcmp(def.key, "temporal_aa") == 0 &&
+                        _stricmp(g_rows[highlighted.def].value.c_str(), "fsr4") == 0;
+                    if (const char* inactive = fsr4InactiveReason(def)) qualityStatus.inactive = inactive;
+                }
+            }
+            if (qualityStatus.aaHighlighted) qualityStatus.backend = fsr4StatusLine(qualityStatus.flat);
+            FlatWarnRuler qualityRuler{c.capPx * 8 / 7};
+            menuComposeQualityStatus(c, qualityStatus, &flatWarnMeasure, &qualityRuler);
         }
         // The Star glow's Bloom note (flat only, on the Visual tab only, and only with the setting above 100 and Elite's Bloom known to be off): a blank
         // line, then the words wrapped to the note face's width. The row stays live.
@@ -2893,11 +2918,7 @@ void buildContent(MenuContent& c) {
         return;
     }
     if (runtimeFlatProfile()) {
-        const char* status = "";
-        if (s.lastWrite.compare(0, 7, "FAILED:") == 0) status = " | write failed";
-        else if (s.lastWrite.compare(0, 8, "writing ") == 0) status = " | saving";
-        else if (!s.flatKeysReadyShown) status = " | keyboard gate unavailable";
-        else if (!s.lastWrite.empty()) status = " | saved";
+        const char* status = menuFlatWriteStatus(s.fsrEdit, s.lastWrite, s.flatKeysReadyShown);
         if (s.padReady)
             snprintf(c.footer, sizeof(c.footer), "D-pad move/change  A select  B back\nLB/RB pages  %s close%s",
                      s.summonName.c_str(), status);
@@ -2915,7 +2936,8 @@ void buildContent(MenuContent& c) {
         in.capturing = s.captureEntry >= 0;
         in.canClear = in.capturing && s.captureDef >= 0 && strcmp(kMenuRows[s.captureDef].key, "menu") != 0;
         // A note from something just done.
-        in.note = (!p.status && s.noteUntilMs > s.tickMs) ? s.noteFooter.c_str() : "";
+        in.note = s.fsrEdit.refused ? s.fsrEdit.reason.c_str() :
+                  (!p.status && s.noteUntilMs > s.tickMs) ? s.noteFooter.c_str() : "";
         in.statusPage = p.status;
         in.pageName = p.name;
         in.privateWanted = s.privateWanted;
@@ -2984,6 +3006,7 @@ void buildToastContent(MenuContent& c, const std::string& text, float widthDeg, 
 void enqueueChange(WriteJob& job, bool held = false) {
     State& s = g_s;
     if (!held) g_held.flush(EditFlush::Other);
+    job.target = Config::get().captureWriteTarget();
     const MenuRowDef& d = kMenuRows[job.def];
     job.before = g_rows[job.def].value;
     job.gen = g_rows[job.def].edits.next();
@@ -3007,7 +3030,8 @@ void applyChange(int defIndex, const std::string& fileValue, bool held = false) 
     WriteJob job;
     job.def = defIndex;
     job.dotted = dottedOf(kMenuRows[defIndex]);
-    job.value = fileValue;
+    if (!prepareFsr4Change(kMenuRows[defIndex], fileValue, job.value)) return;
+    g_s.fsrEdit = {};
     enqueueChange(job, held);
 }
 
@@ -3121,8 +3145,13 @@ void drainWrites() {
         done.swap(g_writer.done);
     }
     for (const WriteDone& w : done) {
+        const SettingsWriteTarget current = Config::get().captureWriteTarget();
+        const bool active = w.job.target.bound() && current.profile == w.job.target.profile && current.epoch == w.job.target.epoch;
+        if (active && w.ok) Config::get().completeWriteTarget(w.job.target);
         if (w.job.destination == WriteDestination::Pairs) {   // F177: the aiming choice, no row owns it
-            aimPromptWriteDone(w);
+            if (active) aimPromptWriteDone(w);
+            else Log::get().note("menu: aiming choice %s for %s; originating profile is no longer active.",
+                w.ok ? "written" : "save not confirmed", utf8Of(w.job.target.leaf).c_str());
             continue;
         }
         completeMenuWrite(w, s, kMenuRows, g_rows, kRowDefCount,
@@ -3131,13 +3160,23 @@ void drainWrites() {
                               return rowPending(d, value, snapshot);
                           },
                           [](const char* format, auto... args) { Log::get().note(format, args...); },
-                          Config::get().iniName());
+                          utf8Of(w.job.target.leaf).c_str(), active);
     }
 }
 
 void stepRow(int defIndex, int dir, int mult) {
     const MenuRowDef& d = kMenuRows[defIndex];
     const std::string& cur = g_rows[defIndex].value;
+    if (const char* why = fsr4InactiveReason(d)) {
+        refuseFsr4Edit(why);
+        return;
+    }
+    if (dottedOf(d) == "fix.fsr4_render_scale") {
+        std::string next;
+        if (menuFsr4Step(cur, dir, mult, next)) applyChange(defIndex, next, true);
+        else refuseFsr4Edit("Custom scale is invalid; type a finite value from 1/3 to 1.");
+        return;
+    }
     if (isDlssPresetRow(d) && dlssPresetDisabled()) {
         g_s.lastWrite = "DLSS preset is inactive: select DLSS or DLAA above first.";
         g_s.contentDirty = true;
@@ -3254,7 +3293,7 @@ void aimPromptWriteDone(const WriteDone& w) {
         aimprompt::Writes wr;
         wr.count = static_cast<int>(w.job.pairs.size()) == 2 ? 2 : 0;
         for (int i = 0; i < wr.count; ++i) wr.pair[i] = {w.job.pairs[static_cast<size_t>(i)].first.c_str(), w.job.pairs[static_cast<size_t>(i)].second.c_str()};
-        aimprompt::formatSaved(line, sizeof(line), wr, Config::get().iniName());
+        aimprompt::formatSaved(line, sizeof(line), wr, utf8Of(w.job.target.leaf).c_str());
         s.lastWrite = w.job.dotted + " = " + w.job.value;
         s.pollRequest = true;
     } else {
@@ -3551,6 +3590,10 @@ bool editBufferBad() {
     // 1..16384 -- never the list.
     if (isOpenxrRenderScaleRow(d)) return !parseTypedWidth(s.editBuf, nullptr);
     if (isVscreenResolutionRow(d)) return !parseVscreenWidth(s.editBuf, nullptr);
+    if (dottedOf(d) == "fix.fsr4_render_scale") {
+        float value = 0;
+        return !fsr4_quality::parseCustomScale(s.editBuf, fsr4_quality::InputMode::Typed, value);
+    }
     if (d.kind != MenuKind::Number) return false;
     if (s.editBuf.empty()) return true;
     char* end = nullptr;
@@ -3564,6 +3607,10 @@ bool editBufferBad() {
 void beginEdit(int entryIndex, int defIndex) {
     State& s = g_s;
     std::string seed = g_rows[defIndex].value;
+    if (const char* why = fsr4InactiveReason(kMenuRows[defIndex])) {
+        refuseFsr4Edit(why);
+        return;
+    }
     // A typed value is a change like a step is: the dimmed Sharpening row takes
     // neither (stepRow says why).
     if (isSharpenRow(kMenuRows[defIndex]) && sharpenRowDisabled()) {
@@ -3638,6 +3685,14 @@ void commitEdit() {
     while (!v.empty() && v.front() == ' ') v.erase(v.begin());
     while (!v.empty() && v.back() == ' ') v.pop_back();
     const bool bad = editBufferBad();
+    if (menuFsr4Key(dottedOf(kMenuRows[def]))) {
+        std::string canonical;
+        if (!prepareFsr4Change(kMenuRows[def], v, canonical)) {
+            s.editBad = true;
+            return; // Keep the invalid typed value visible; Enter did not save it.
+        }
+        v = canonical;
+    }
     cancelEdit();
     const MenuRowDef& d = kMenuRows[def];
     if (bad) {
@@ -4025,6 +4080,11 @@ void dispatchNav(MenuNav nav, uint64_t now) {
             break;
         case kNavReset:
             if (!p.status && !p.entries.empty() && p.entries[p.highlight].kind == EntryKind::Setting) {
+                if (const char* why = fsr4InactiveReason(kMenuRows[p.entries[p.highlight].def])) {
+                    refuseFsr4Edit(why);
+                    s.resetArmedEntry = -1;
+                    break;
+                }
                 if (s.resetArmedEntry == p.highlight && now - s.resetArmedMs < kResetArmMs) {
                     const int def = p.entries[p.highlight].def;
                     const MenuRowDef& d = kMenuRows[def];
@@ -4641,7 +4701,12 @@ bool aimPromptOnFirstMenuOpen(uint64_t now) {
 // never configured: menuPanelFlatResize tests each pointer, and inputGateSetPrivate(false) is a no-op while the flag is clear.
 void menuProfileSwitch() {
     State& s = g_s;
+    g_held.flush(EditFlush::Other);
     if (s.open) closeMenu("profile switch");
+    s.menuWroteDotted.clear();
+    s.menuWroteDotted2.clear();
+    s.lastWrite.clear();
+    menuFsr4ProfileChanged(s.fsrEdit, s.renderQualityRevision);
     // The outgoing profile's flat notice, queued or on screen, goes with it: Config::switchProfile clears the AA comparison override it described.
     s.flatNotice.clear();
     s.flatNoticeUp = false;
@@ -5032,6 +5097,7 @@ void menuTick(ID3D11Device* dev) {
     State& s = g_s;
     menuDrainPluginRows();
     if (!s.configured) return;
+    if (menuFsr4RevisionChanged(gameRenderScaleSnapshot().revision, s.renderQualityRevision)) s.contentDirty = true;
     {
         // TEMPORARY (concourse window mode, docs\concourse-cull-2026-11-05.md): a hotkey change of the mode, and the capture's result, are said as a notice (flat: the panel's
         // raster in the upper left, as the AA comparison's; VR: a toast). menuShowNotice keeps only the newest "Windows: " notice.

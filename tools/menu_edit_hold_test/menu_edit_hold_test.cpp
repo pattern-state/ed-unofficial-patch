@@ -1,3 +1,6 @@
+#include <windows.h>
+#include "../../src/common/iniedit.h"
+#include <stdexcept>
 // menu_edit_hold_test: held numeric edits in the F8 menu are coalesced before the settings file is written and re-read (src/d3d11/menu_edit_hold.h), and the config refresh
 // window line (src/d3d11/config_refresh_line.h) says what it counted. Pure.
 //
@@ -36,6 +39,7 @@
 #include "menu_edit_hold.h"
 #include "menu_write.h"
 #include "menu_keys.h"
+#include "menu_fsr4_quality_test.h"
 
 using namespace edvr;
 
@@ -481,6 +485,62 @@ struct CompletionRig {
     }
 };
 
+void caseProfileWrites() {
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring dir = std::wstring(temp) + L"edup-menu-writes-" + std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(dir.c_str(), nullptr);
+    WriteJob a, b;
+    a.target = {RuntimeProfile::Flat, 1, dir + L"\\edvr-flat.ini", dir + L"\\edvr.ini", L"edvr-flat.ini", true};
+    a.dotted = "fix.render_sharpness";
+    a.value = "0.75";
+    b = a;
+    check(menuWritesCoalesce(a, b), "H16.b identical profile and row jobs coalesce");
+    ++b.target.epoch;
+    check(!menuWritesCoalesce(a, b), "H16.c different profile epochs never coalesce");
+    b = a; b.target.path += L".other";
+    check(!menuWritesCoalesce(a, b), "H16.d different destinations never coalesce");
+    b = a; b.pairs = {{a.dotted, "0.5"}, {"fix.other", "on"}};
+    check(!menuWritesCoalesce(a, b) && !menuWritesCoalesce(b, b), "H16.e paired writes remain whole jobs");
+    SettingsWriteSideEffects effects;
+    std::wstring why;
+    check(writeFileAtomic(a.target.fallbackSource, "[fix]\r\nrender_sharpness = 0.2\r\nother = on\r\n", &why), "H16.f real-file source created");
+    const WriteDone done = runMenuWrite(a, [&](const WriteJob& w, std::string* error) {
+        return writeSettingsPairs(w.target, {{w.dotted, w.value}}, effects, error);
+    });
+    check(done.ok, "H16.g production job writes through real shared persistence");
+    struct FaultAfterReplace : SettingsWriteSideEffects {
+        void mirror(const SettingsWriteTarget&, const std::string&) override { throw std::runtime_error("fault after replace"); }
+    } fault;
+    const WriteDone unconfirmed = runMenuWrite(a, [&](const WriteJob& w, std::string* error) {
+        try { return writeSettingsPairs(w.target, {{w.dotted, "0.5"}}, fault, error); }
+        catch (const std::exception& e) { *error = e.what(); return false; }
+    });
+    std::string persisted;
+    bool exists = false;
+    std::string error;
+    check(!unconfirmed.ok && unconfirmed.err == "fault after replace" &&
+          readWriteSource(a.target, &persisted, &exists, &error) && iniValue(persisted, a.dotted) == "0.5",
+          "H16.h fault after replacement reports unconfirmed despite changed bytes");
+    CompletionRig r;
+    r.state.lastWrite = "new profile edit";
+    completeMenuWrite(unconfirmed, r.state, r.defs, r.rows, 2,
+        [&](const CompletionDef&) { return r.file; },
+        [](const CompletionDef&, const std::string&, const std::string&) { return false; },
+        [](const char*, auto...) {}, "edvr-flat.ini", false);
+    check(r.state.lastWrite == "new profile edit" && !r.state.pollRequest && !r.state.contentDirty && r.rows.accesses == 0,
+          "H16.i stale failed completion cannot roll back or alter the active profile");
+    completeMenuWrite(done, r.state, r.defs, r.rows, 2,
+        [&](const CompletionDef&) { return r.file; },
+        [](const CompletionDef&, const std::string&, const std::string&) { return false; },
+        [](const char*, auto...) {}, "edvr-flat.ini", false);
+    check(r.state.lastWrite == "new profile edit" && !r.state.pollRequest && r.rows.accesses == 0,
+          "H16.j stale successful completion cannot reload or alter active profile");
+    DeleteFileW(a.target.path.c_str());
+    DeleteFileW(a.target.fallbackSource.c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
 void caseWriterCompletion() {
     for (WriteDestination destination : {WriteDestination::PluginSetting, WriteDestination::AddonApproval}) {
         for (bool ok : {true, false}) {
@@ -644,6 +704,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: menu_edit_hold_test --self-test [repository root] | --dry-run\n");
         return 2;
     }
+    menu_fsr4_quality_test::run(&check);
     caseTap();
     caseLongHold();
     caseNoStepsComing();
@@ -657,6 +718,14 @@ int main(int argc, char** argv) {
     caseMerge();
     caseBudget();
     caseLine();
+    {
+        WriteJob a, b;
+        a.target = b.target = {RuntimeProfile::Flat, 1, L"fixture/edvr-flat.ini", L"", L"edvr-flat.ini", false};
+        a.dotted = b.dotted = "fix.render_sharpness";
+        b.destination = WriteDestination::PluginSetting;
+        check(!menuWritesCoalesce(a, b), "H16.a same key with a different row identity must not coalesce");
+    }
+    caseProfileWrites();
     caseWriterCompletion();
     caseGlue(root);
     if (g_failures) {

@@ -88,9 +88,12 @@ constexpr int kMenuMaxTabs = 8;
 // silently past this, and the line it would drop is `Last write`. 17 since
 // 2026-10-14: the flat page gained its sixth row (Intro movie), and 18 since
 // 2026-10-16 for its seventh (Sharp weapons, retired 2026-10-28), and 19 since
-// 2026-11-08 for Skip rooms behind doors: its rows, a blank line and the ten-line
-// warning (flat_elite_settings.h) are the whole card.
-constexpr int kMenuMaxLines = 19;
+// 2026-11-08 for Skip rooms behind doors. The flat render-quality controls and visible
+// outcomes add their bounded storage below; VR still uses its existing visible-row window.
+// Storage includes ten flat settings, a separator, ten warning lines and five quality-status lines.
+// VR retains its existing visible-row window; only the fixed-size flat card uses the expanded budget.
+constexpr int kMenuMaxLines = 26;
+constexpr int kMenuRenderQualityLines = 5;
 constexpr int kMenuMaxTiles = 16;
 
 // A gauge: a big number with a small caption above and one small line
@@ -218,6 +221,8 @@ void menuPanelSubmit(const MenuContent& c);
 #ifdef EDVR_MENU_TEST
 bool menuPanelWorkerReadyForTest();
 int  menuPanelLayoutHeightForTest(const MenuContent& c);
+bool menuPanelRasterForTest(const MenuContent& c, int* height);
+bool menuPanelFooterRectsForTest(const MenuContent& c, int text[4], int tag[4]);
 // The rect layout() gives the text op for the line at `i`'s left text (pixels, the frame the
 // raster draws in), read from layout()'s own ops. The heading's is the ellipsis check: the
 // DrawTextW single-line path cuts text at the rect's right edge, so a heading measured wider

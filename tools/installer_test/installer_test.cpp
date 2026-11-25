@@ -22,7 +22,12 @@
 #include <shlobj.h>
 #include <tlhelp32.h>
 
+#include <commctrl.h>
+#include "../../src/installer/settings_view.h"
+#include "../../src/installer/ui.h"
+
 #include <algorithm>
+#include "../../src/common/fsr4_quality.h"
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
@@ -5959,6 +5964,250 @@ static void testRunState() {
 // the settings window's write path
 // ---------------------------------------------------------------------------
 
+static void testFsrSettings(const std::wstring& root, const std::wstring& scratch) {
+    printf("\nFSR quality settings\n");
+    const std::wstring dir = joinPath(scratch, L"fsr-settings");
+    removeTree(dir);
+    makeTree(dir);
+    const std::string initial = "[fix]\r\ntemporal_aa = fsr4\r\nfsr4_quality = game\r\nfsr4_render_scale = 0.75\r\n[other]\r\nuntouched = yes\r\n";
+    writeAll(joinPath(dir, L"edvr.ini"), initial);
+    SettingsModel model;
+    model.load(dir, "flat");
+    auto rowFor = [](const SettingsModel& m, const char* key) {
+        for (size_t i = 0; i < m.rows().size(); ++i)
+            if (std::string(m.rows()[i].def->section) + "." + m.rows()[i].def->key == key) return i;
+        return SIZE_MAX;
+    };
+    const size_t quality = rowFor(model, "fix.fsr4_quality"), scale = rowFor(model, "fix.fsr4_render_scale"), aa = rowFor(model, "fix.temporal_aa");
+    check(quality != SIZE_MAX && scale != SIZE_MAX && aa != SIZE_MAX, "both generated FSR rows are available in the flat model");
+    if (quality == SIZE_MAX || scale == SIZE_MAX || aa == SIZE_MAX) return;
+    check(model.rows()[quality].def->kind == SettingKind::Choice && model.rows()[quality].choices.size() == 7 &&
+          model.rows()[quality].choices[5].label == "Ultra Performance" && model.rows()[scale].def->kind == SettingKind::Number &&
+          model.rows()[scale].def->precision == 2 && !model.rows()[scale].def->percent,
+          "generated rows contain full preset labels and fractional numeric scale metadata");
+    check(!model.inactiveReason(scale).empty() && model.inactiveReason(quality).empty(), "custom scale is inactive until Custom is selected");
+    check(model.set(quality, "quality"), "named quality selection succeeds", model.lastError());
+    expectEq(readAll(joinPath(dir, L"edvr.ini")), initial, "first flat quality edit leaves shared bytes unchanged");
+    std::string file = readAll(joinPath(dir, L"edvr-flat.ini"));
+    check(iniValue(file, "fix.fsr4_quality") == "quality" && iniValue(file, "fix.fsr4_render_scale") == "0.75" &&
+          iniValue(file, "other.untouched") == "yes", "fallback seeds the whole flat document and retains custom scale");
+    const std::string before = file;
+    check(!model.set(scale, "0.5") && readAll(joinPath(dir, L"edvr-flat.ini")) == before, "inactive custom write refuses without touching bytes");
+    check(model.set(quality, "custom") && model.inactiveReason(scale).empty(), "Custom immediately enables fractional entry");
+    for (const wchar_t* invalid : {L"", L"0.3", L"1.1", L"nan", L"inf", L"0.75%", L"0.75junk"}) {
+        std::string parsed;
+        check(!model.rows()[scale].parseTyped(invalid, &parsed), "invalid custom typing is refused by the production row parser");
+    }
+    std::string parsed;
+    check(model.rows()[scale].parseTyped(L"0.75", &parsed) && parsed == "0.75", "typed scale stays a raw fraction");
+    check(model.rows()[scale].parseTyped(L"0.33333334", &parsed) && parsed == edvr::fsr4_quality::formatCustomScale(edvr::fsr4_quality::minimumCustomScale),
+          "near one-third input preserves float round-trip precision");
+    check(model.set(scale, parsed) && iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "fix.fsr4_render_scale") == parsed,
+          "precise fractional value reaches the selected profile file");
+    file = readAll(joinPath(dir, L"edvr-flat.ini")) + "external = survives\r\n";
+    writeAll(joinPath(dir, L"edvr-flat.ini"), file);
+    check(model.set(scale, "0.75") && iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "other.external") == "survives",
+          "fresh-document save preserves an external unrelated edit");
+    check(model.set(scale, model.rows()[scale].def->recommended) && model.set(quality, model.rows()[quality].def->recommended),
+          "scale and preset reset use the same validated save route");
+    file = readAll(joinPath(dir, L"edvr-flat.ini"));
+    std::string changed = mergeIni(file, file, &file, {{"fix.temporal_aa", "off"}}, nullptr);
+    writeAll(joinPath(dir, L"edvr-flat.ini"), changed);
+    check(!model.set(quality, "custom") && readAll(joinPath(dir, L"edvr-flat.ini")) == changed && !model.inactiveReason(quality).empty(),
+          "external AA change while editing rejects the commit using the freshly reread document");
+    check(model.set(aa, "fsr4") && model.set(quality, "custom"), "AA on immediately restores preset and custom dependencies");
+    file = readAll(joinPath(dir, L"edvr-flat.ini"));
+    changed = mergeIni(file, file, &file, {{"fix.fsr4_quality", "quality"}}, nullptr);
+    writeAll(joinPath(dir, L"edvr-flat.ini"), changed);
+    check(!model.set(scale, "0.5") && readAll(joinPath(dir, L"edvr-flat.ini")) == changed, "external preset change while typing rejects a newly inactive scale commit");
+    changed = mergeIni(changed, changed, &changed, {{"fix.fsr4_render_scale", "bad"}}, nullptr);
+    writeAll(joinPath(dir, L"edvr-flat.ini"), changed);
+    check(!model.set(quality, "custom") && model.set(quality, "performance"), "malformed remembered scale blocks Custom but allows named presets");
+    check(!model.set(quality, "unknown"), "unknown preset cannot be saved");
+    file = readAll(joinPath(dir, L"edvr-flat.ini"));
+    const std::string shownBeforeFailure = model.rows()[quality].value;
+    HANDLE locked = CreateFileW(joinPath(dir, L"edvr-flat.ini").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    check(locked != INVALID_HANDLE_VALUE && !model.set(quality, "quality"), "failed save is reported while destination is unreadable");
+    if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+    check(model.rows()[quality].value == shownBeforeFailure, "unreadable-save failure preserves the prior visible setting");
+    expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), file, "failed save preserves existing file bytes");
+    SettingsModel vr;
+    vr.load(dir, "vr");
+    check(vr.set(rowFor(vr, "fix.fsr4_quality"), "native"), "VR preset writes its own shared document");
+    expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), file, "VR preset write preserves the flat profile document");
+    (void)root;
+}
+
+
+// Capture only the scratch-owned settings client: no desktop or account state.
+static void captureFsrSettings(HWND window, const std::wstring& path) {
+    RECT client{}; GetClientRect(window, &client);
+    HDC source = GetDC(window), memory = CreateCompatibleDC(source);
+    HBITMAP bitmap = CreateCompatibleBitmap(source, client.right, client.bottom);
+    HGDIOBJ old = SelectObject(memory, bitmap);
+    const bool copied = BitBlt(memory, 0, 0, client.right, client.bottom, source, 0, 0, SRCCOPY) != 0;
+    SelectObject(memory, old);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = client.right;
+    info.bmiHeader.biHeight = -client.bottom;
+    info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    std::string pixels(static_cast<size_t>(client.right) * client.bottom * 4, '\0');
+    const bool extracted = GetDIBits(memory, bitmap, 0, client.bottom, &pixels[0], &info, DIB_RGB_COLORS) != 0;
+    BITMAPFILEHEADER file{}; file.bfType = 0x4d42;
+    file.bfOffBits = sizeof(file) + sizeof(info.bmiHeader);
+    file.bfSize = file.bfOffBits + static_cast<DWORD>(pixels.size());
+    std::string bytes(reinterpret_cast<const char*>(&file), sizeof(file));
+    bytes.append(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(info.bmiHeader)); bytes += pixels;
+    check(copied && extracted && writeAll(path, bytes), "scratch settings client capture is written");
+    DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(window, source);
+}
+
+struct FsrPopupProbe {
+    int choice = -1;
+    HMENU menu = nullptr;
+    bool labels = false;
+    bool readable = false;
+};
+static LRESULT CALLBACK fsrPopupProc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
+                                    UINT_PTR, DWORD_PTR data) {
+    auto* probe = reinterpret_cast<FsrPopupProbe*>(data);
+    if (message == WM_TIMER && wp == 77) {
+        KillTimer(hwnd, 77);
+        HWND popup = nullptr;
+        EnumWindows([](HWND candidate, LPARAM data) -> BOOL {
+            DWORD pid = 0; GetWindowThreadProcessId(candidate, &pid);
+            wchar_t name[32]{}; GetClassNameW(candidate, name, 32);
+            if (pid == GetCurrentProcessId() && std::wstring(name) == L"#32768") {
+                *reinterpret_cast<HWND*>(data) = candidate; return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&popup));
+        MENUBARINFO info{}; info.cbSize = sizeof(info);
+        if (!popup || !GetMenuBarInfo(popup, OBJID_CLIENT, 0, &info)) { EndMenu(); return 0; }
+        probe->menu = info.hMenu;
+        const wchar_t* labels[] = {L"Game", L"Native AA", L"Quality", L"Balanced",
+                                  L"Performance", L"Ultra Performance", L"Custom"};
+        probe->labels = GetMenuItemCount(probe->menu) == 7;
+        for (int i = 0; i < 7; ++i) {
+            wchar_t text[80]{};
+            GetMenuStringW(probe->menu, i, text, 80, MF_BYPOSITION);
+            probe->labels = probe->labels && std::wstring(text) == labels[i];
+        }
+        RECT box{};
+        probe->readable = GetMenuItemRect(hwnd, probe->menu, 5, &box) &&
+                          box.right > box.left && box.bottom > box.top;
+        NONCLIENTMETRICSW metrics{}; metrics.cbSize = sizeof(metrics);
+        if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
+            HFONT font = CreateFontIndirectW(&metrics.lfMenuFont);
+            HDC dc = GetDC(hwnd);
+            HGDIOBJ old = SelectObject(dc, font);
+            SIZE extent{};
+            GetTextExtentPoint32W(dc, L"Ultra Performance", 17, &extent);
+            probe->readable = probe->readable && box.right - box.left > extent.cx;
+            SelectObject(dc, old); ReleaseDC(hwnd, dc); DeleteObject(font);
+        } else probe->readable = false;
+        if (probe->choice < 0) {
+            PostMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        } else {
+            RECT selected{};
+            if (!GetMenuItemRect(hwnd, probe->menu, probe->choice, &selected)) { EndMenu(); return 0; }
+            const int x = (selected.left + selected.right) / 2, y = (selected.top + selected.bottom) / 2;
+            const BOOL moved = SetCursorPos(x, y);
+            POINT actual{}; GetCursorPos(&actual);
+            printf("  popup choice=%d rect=%ld,%ld,%ld,%ld cursor=%ld,%ld moved=%d screen=%dx%d\n",
+                probe->choice, selected.left, selected.top, selected.right, selected.bottom,
+                actual.x, actual.y, moved, GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            INPUT clicks[2]{};
+            clicks[0].type = clicks[1].type = INPUT_MOUSE;
+            clicks[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+            clicks[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+            printf("  popup injected mouse events=%u\n", SendInput(2, clicks, sizeof(INPUT)));
+        }
+        return 0;
+    }
+    return DefSubclassProc(hwnd, message, wp, lp);
+}
+static void testFsrSettingsHwnd(const std::wstring& scratch, UINT onlyDpi = 0) {
+    printf("\nFSR settings production HWND / native popup\n");
+    const std::wstring dir = joinPath(scratch, L"fsr-hwnd");
+    removeTree(dir); makeTree(dir);
+    const std::string initial = "[fix]\r\ntemporal_aa = fsr4\r\nfsr4_quality = game\r\nfsr4_render_scale = 0.75\r\n";
+    writeAll(joinPath(dir, L"edvr-flat.ini"), initial);
+    SettingsModel model; model.load(dir, "flat");
+    POINT cursor{}; GetCursorPos(&cursor);
+    const DPI_AWARENESS_CONTEXT priorDpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    ui::startup();
+    for (UINT dpi : {96u, 144u, 192u}) {
+        if (onlyDpi && dpi != onlyDpi) continue;
+        printf("  production settings widget DPI: %u\n", dpi);
+        ui::buildFonts(dpi);
+        HWND owner = CreateWindowExW(0, L"STATIC", L"EDUP temporary FSR settings acceptance",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, ui::dp(920, dpi), ui::dp(400, dpi),
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND list = createSettingsList(owner, 88, dpi);
+        MoveWindow(list, 0, 0, ui::dp(900, dpi), ui::dp(320, dpi), TRUE);
+        ShowWindow(list, SW_SHOW);
+        settingsListSetModel(list, &model, joinPath(scratch, L"fsr-hwnd-mirror"));
+        settingsListSetFilter(list, L"fsr4_quality");
+        UpdateWindow(owner); UpdateWindow(list);
+        FsrPopupProbe probe;
+        SetWindowSubclass(list, fsrPopupProc, 88, reinterpret_cast<DWORD_PTR>(&probe));
+        auto click = [&]() { SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON,
+            MAKELPARAM(ui::dp(750, dpi), ui::dp(80, dpi))); };
+        auto popupClick = [&]() {
+            SetForegroundWindow(owner);
+            const UINT_PTR watchdog = SetTimer(nullptr, 0, 4000,
+                [](HWND, UINT, UINT_PTR, DWORD) { printf("  popup watchdog timeout\n"); EndMenu(); });
+            SetTimer(list, 77, 100, nullptr); click(); KillTimer(list, 77);
+            KillTimer(nullptr, watchdog);
+        };
+        const std::string before = readAll(joinPath(dir, L"edvr-flat.ini"));
+        popupClick();
+        check(probe.labels && probe.readable, "real native popup contains all seven full labels at supported DPI");
+        expectEq(readAll(joinPath(dir, L"edvr-flat.ini")), before, "Escape from real popup writes no settings bytes");
+        probe.choice = 2;
+        popupClick();
+        check(iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "fix.fsr4_quality") == "quality",
+              "native popup selection persists Quality through production click handler");
+        probe.choice = 6;
+        popupClick();
+        check(iniValue(readAll(joinPath(dir, L"edvr-flat.ini")), "fix.fsr4_quality") == "custom",
+              "native popup Custom selection persists immediately");
+        settingsListSetFilter(list, L"fsr4_render_scale");
+        click();
+        HWND edit = GetDlgItem(list, 9001);
+        check(edit && IsWindowVisible(edit), "Custom immediately opens the production fractional edit control");
+        if (edit) {
+            SetWindowTextW(edit, L"0.75junk");
+            SendMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
+            check(IsWindowVisible(edit) && !settingsListLastError(list).empty(),
+                  "invalid native typing stays open with a visible error");
+            UpdateWindow(list);
+            captureFsrSettings(list, joinPath(scratch, L"fsr-settings-" + std::to_wstring(dpi) + L".bmp"));
+            SendMessageW(edit, WM_KEYDOWN, VK_ESCAPE, 0);
+            check(!IsWindowVisible(edit) && settingsListLastError(list).empty(), "Escape cancels invalid native typing");
+            click();
+            SetWindowTextW(edit, L"0.75");
+            std::string changed = readAll(joinPath(dir, L"edvr-flat.ini"));
+            changed = mergeIni(changed, changed, &changed, {{"fix.temporal_aa", "off"}}, nullptr);
+            writeAll(joinPath(dir, L"edvr-flat.ini"), changed);
+            SendMessageW(edit, WM_KEYDOWN, VK_RETURN, 0);
+            check(IsWindowVisible(edit) && !settingsListLastError(list).empty() &&
+                  readAll(joinPath(dir, L"edvr-flat.ini")) == changed,
+                  "unchanged typed commit rereads external AA and visibly refuses newly inactive scale");
+            SendMessageW(edit, WM_KEYDOWN, VK_ESCAPE, 0);
+        }
+        RemoveWindowSubclass(list, fsrPopupProc, 88);
+        DestroyWindow(owner);
+        writeAll(joinPath(dir, L"edvr-flat.ini"), initial); model.load(dir, "flat");
+    }
+    ui::shutdown();
+    if (priorDpi) SetThreadDpiAwarenessContext(priorDpi);
+    SetCursorPos(cursor.x, cursor.y);
+}
+
 static void testSettings(const std::wstring& root, const std::wstring& scratch) {
     printf("\nsettings\n");
 
@@ -6897,6 +7146,21 @@ int wmain(int argc, wchar_t** argv) {
     const std::wstring root = argc > 1 ? argv[1] : L".";
     const std::wstring scratch = argc > 2 ? argv[2] : joinPath(root, L"build\\insttest_scratch");
     makeTree(scratch);
+    if (argc > 3 && std::wstring(argv[3]) == L"--fsr-settings-only") {
+        testFsrSettings(root, scratch);
+        testFlatSettingsWindow(root, scratch);
+        testSettings(root, scratch);
+        return g_fails == 0 ? 0 : 1;
+    }
+    // Visible HWND acceptance is explicit; the normal build suite stays windowless.
+    if (argc > 3 && std::wstring(argv[3]) == L"--fsr-settings-ui-192") {
+        testFsrSettingsHwnd(scratch, 192);
+        return g_fails == 0 ? 0 : 1;
+    }
+    if (argc > 3 && std::wstring(argv[3]) == L"--fsr-settings-ui") {
+        testFsrSettingsHwnd(scratch);
+        return g_fails == 0 ? 0 : 1;
+    }
     edvr::installer::test::nativeContractCases([](bool ok, const char* what) { check(ok, what); });
     edvr::installer::test::nativeBuiltContractCases([](bool ok,const char* what){check(ok,what);},root);
     edvr::installer::native_apply_cases::run([](bool ok, const char* what) { check(ok, what); }, joinPath(scratch, L"native_apply"), placeFile);
@@ -6933,6 +7197,7 @@ int wmain(int argc, wchar_t** argv) {
     testFlatMirror(scratch);
     testProbe(scratch);
     testRunState();
+    testFsrSettings(root, scratch);
     testSettings(root, scratch);
     testLogBundle(scratch);
     testState();

@@ -28,14 +28,19 @@ FILES = {
     "hold": ROOT / "src" / "d3d11" / "menu_edit_hold.h",
     "line": ROOT / "src" / "d3d11" / "config_refresh_line.h",
     "writer": ROOT / "src" / "d3d11" / "menu_write.h",
+    "persistence": ROOT / "src/common/settings_write_target.cpp",
+    "iniedit": ROOT / "src/common/iniedit.cpp",
     "menu": ROOT / "src" / "d3d11" / "menu.cpp",           # read by the rig as text (H11)
     "perf": ROOT / "src" / "d3d11" / "perf_monitor.cpp",   # ...and this one (H13.p)
 }
 TREE_EXTRA = [("src/d3d11/menu_keys.h", ROOT / "src" / "d3d11" / "menu_keys.h")]
+TREE_EXTRA += [("src/common/" + name + ".h", ROOT / "src/common" / (name + ".h")) for name in (
+    "settings_write_target", "runtime_profile", "iniedit", "ini_name", "install_scope",
+    "stereo_mode", "elite_graphics_folder", "flat_profile_keys")]
 CONFIG = lib.Config(
-    here=__file__, files=FILES, header_keys=("hold", "line", "writer"), pin_keys=("menu", "perf", "writer"), rig=HERE / "menu_edit_hold_test.cpp",
+    here=__file__, files=FILES, header_keys=("hold", "line", "writer", "persistence", "iniedit"), pin_keys=("menu", "perf", "writer"), rig=HERE / "menu_edit_hold_test.cpp",
     rig_label=":rig_menu_edit_hold_test", rig_source_in_bat="tools\\menu_edit_hold_test\\menu_edit_hold_test.cpp", rig_exe_in_bat="menu_edit_hold_test.exe",
-    case_prefix="H", include_dirs=("src/d3d11",), min_mutants=30, run_timeout=120.0, tree_extra=TREE_EXTRA)
+    case_prefix="H", include_dirs=("src/d3d11",), min_mutants=30, run_timeout=120.0, tree_extra=TREE_EXTRA, units=(("src/common/settings_write_target.cpp", "persistence"), ("src/common/iniedit.cpp", "iniedit")))
 
 BOUND = "else if (now - m_firstMs >= kEditMaxWaitMs) why = EditFlush::MaxWait;"
 SENTENCE = 'reloads == 0 && edits == 0 ? " No refresh and no menu edit in this window." : ""'
@@ -134,6 +139,12 @@ MUTANTS = [
     M("addon-approval-destination-omitted", "H15", "menu",
       [("        job.destination = WriteDestination::AddonApproval;\n", "")],
       "the approval enqueuer falls back to a builtin destination"),
+    M("coalesce-ignores-origin", "H16", "writer",
+      [("sameWriteTarget(a.target, b.target)", "true")],
+      "same-key jobs from different profile epochs or destinations erase each other"),
+    M("completion-ignores-origin", "H16", "writer",
+      [("if (!currentTarget) {", "if (false) {")],
+      "an old profile completion changes current status or rolls back current rows"),
     M("monitor-line-has-its-own-sentence", "H13", "perf", [(FORMAT_CALL, FORMAT_CALL + ' std::strcat(refreshLine, " All zero: no refresh in the window.");')],
       "the monitor adds the closing sentence to the formatter's line, after counts that are not zero"),
 ]

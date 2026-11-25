@@ -2,6 +2,7 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/parallel_projection_notice.h"
 #include "../../src/d3d11/menu_panel.h"
+#include "../../src/d3d11/menu_fsr4_quality.h"
 #include "../../src/openxr/native_menu_client.h"
 #include "../../src/openxr/eye_capture.h"
 #include "../../src/openxr/immediate_executor.h"
@@ -220,6 +221,97 @@ int wmain(int argc, wchar_t** argv) {
                   "menu.cpp sets reserveHint inside the pad block, ahead of its pad loop");
             check(menu.find("c.reserveHint = true;", set + 1) == std::string::npos,
                   "menu.cpp sets reserveHint in exactly one place (the pad block; the Monitor and prompt pages reserve none)");
+        }
+        // Flat quality status and a full structural warning coexist at the production cap and width.
+        edvr::MenuContent quality{};
+        quality.widthPx = quality.cardPx = 860;
+        quality.capPx = 34;
+        quality.compact = true;
+        quality.reserveHint = true;
+        quality.tabCount = 3;
+        quality.lineCount = edvr::kMenuMaxLines;
+        std::strcpy(quality.overlayLine, "144 FPS");
+        std::strcpy(quality.footer, "Up/Down row  Left/Right change  Tab page\nF8/Esc close | not saved");
+        std::strcpy(quality.hint, "Select FSR4 anti-aliasing to change render quality.");
+        for (int i = 0; i < quality.lineCount; ++i) {
+            std::snprintf(quality.lines[i].left, sizeof(quality.lines[i].left), "Visible row, warning or render quality detail %d", i);
+            quality.lines[i].style = i < 10 ? edvr::kMenuRow : edvr::kMenuNote;
+        }
+        const int qualityHeight = edvr::menuPanelLayoutHeightForTest(quality);
+        int rasterHeight = 0;
+        check(qualityHeight > 0 && qualityHeight <= 2048, "26 flat rows plus hint, two-line footer and overlay fit actual raster height");
+        check(edvr::menuPanelRasterForTest(quality, &rasterHeight) && rasterHeight == qualityHeight,
+              "full flat warning/status card actually rasterizes on CPU at the measured height");
+        int lastX0 = 0, lastY0 = 0, lastX1 = 0, lastY1 = 0;
+        edvr::menuPanelLineRectForTest(quality, quality.lineCount - 1, &lastX0, &lastY0, &lastX1, &lastY1);
+        check(lastY1 > lastY0 && lastY1 < qualityHeight, "last status line has a real visible text rectangle inside the raster");
+        std::printf("flat quality layout: %d lines, height %d, CPU raster %d, final line y=%d..%d\n",
+                    quality.lineCount, qualityHeight, rasterHeight, lastY0, lastY1);
+        {
+            edvr::MenuContent flat{};
+            flat.widthPx = flat.cardPx = 860; flat.capPx = 34; flat.compact = true; flat.reserveHint = true;
+            edvr::MenuQualityStatus view;
+            view.flat = view.qualityPage = view.qualityHighlighted = true;
+            view.controller.requested.quality.preset = edvr::fsr4_quality::Preset::Custom;
+            view.controller.state = edvr::renderscale::State::Game;
+            view.controller.actualValid = true; view.controller.actual.ss = .75f;
+            view.observed[0].sequence = 4;
+            view.observed[0].outcome = edvr::Fsr4DispatchOutcome::Submitted;
+            view.observed[0].inW = 2880; view.observed[0].inH = 810;
+            view.observed[0].outW = 3840; view.observed[0].outH = 1080;
+            auto measure = [](const char* text, void*) { return edvr::menuPanelMeasureLine(text, 34 * 8 / 7); };
+            edvr::menuComposeQualityStatus(flat, view, measure, nullptr);
+            std::string words = flat.hint;
+            for (int i = 0; i < flat.lineCount; ++i) words += std::string(" ") + flat.lines[i].left;
+            const size_t firstRequested = words.find("Requested");
+            check(firstRequested != std::string::npos && words.find("Requested", firstRequested + 1) == std::string::npos,
+                  "actual flat quality compositor shows requested status once across hint and notes");
+            check(words.find("2880x810") != std::string::npos && words.find("3840x1080") != std::string::npos &&
+                  words.find("Observed sizes pending") == std::string::npos && words.find("Applied") == std::string::npos,
+                  "Game shows raw observed flat dimensions without claiming managed Applied");
+            view.controller.epoch = 2; view.observed[0].epoch = 1;
+            edvr::MenuContent historical = flat; historical.lineCount = 0;
+            edvr::menuComposeQualityStatus(historical, view, measure, nullptr);
+            std::string history;
+            for (int i = 0; i < historical.lineCount; ++i) history += std::string(" ") + historical.lines[i].left;
+            check(history.find("Historical FSR") != std::string::npos && history.find("Applied") == std::string::npos,
+                  "old backend observations are explicitly historical, never current managed success");
+            view.qualityHighlighted = false; view.aaHighlighted = true;
+            view.backend = edvr::fsr4DispatchStatusText("FSR 4.1.2", view.observed, true);
+            edvr::MenuContent aa = flat; aa.lineCount = 0;
+            edvr::menuComposeQualityStatus(aa, view, measure, nullptr);
+            check(std::string(aa.hint).find("Flat submitted 2880x810 -> 3840x1080") != std::string::npos &&
+                  std::string(aa.hint).find("slot 1") == std::string::npos && std::string(aa.hint).find("slot 2") == std::string::npos,
+                  "flat AA highlight uses only its actual route, never unused VR slots");
+            view.backend = "FSR 4 unavailable: no provider";
+            edvr::menuComposeQualityStatus(aa, view, measure, nullptr);
+            check(std::string(aa.hint) == view.backend, "flat AA hint preserves backend availability refusal");
+            view.flat = false; view.aaHighlighted = false; view.qualityHighlighted = true;
+            edvr::MenuContent vr{}; vr.cardPx = vr.widthPx = 860; vr.capPx = 34;
+            edvr::menuComposeQualityStatus(vr, view, measure, nullptr);
+            check(vr.lineCount == 0 && std::string(vr.hint).find("Requested") != std::string::npos,
+                  "VR quality retains its hint-only layout");
+            for (const char* footer : {"D-pad move/change  A select  B back\nLB/RB pages  F8 close | saved",
+                                       "Up/Down row  Left/Right change  Tab page\nF8/Esc close | not saved"}) {
+                std::strcpy(flat.footer, footer);
+                std::strcpy(flat.footerTag, "ED-UP v0.22.0-rc.7-308-gf0b40e6c-dirty");
+                int left[4]{}, tag[4]{};
+                check(edvr::menuPanelFooterRectsForTest(flat, left, tag) &&
+                      (left[2] <= tag[0] || left[3] <= tag[1] || tag[3] <= left[1]),
+                      "production footer control and full dirty-version rectangles never overlap");
+                check(edvr::menuPanelMeasureLine(std::strchr(footer, '\n') + 1, flat.capPx) <= left[2] - left[0] &&
+                      edvr::menuPanelMeasureLine(flat.footerTag, flat.capPx) <= tag[2] - tag[0],
+                      "actual footer glyph widths fit their separately reserved rectangles");
+                edvr::MenuContent maximum = flat; maximum.lineCount = edvr::kMenuMaxLines;
+                int maximumHeight = 0;
+                check(edvr::menuPanelRasterForTest(maximum, &maximumHeight) && maximumHeight <= 2048,
+                      "maximum flat card including separate full-version line fits the production raster bound");
+            }
+            flat.cardPx = flat.widthPx = 480;
+            int narrowText[4]{}, narrowTag[4]{};
+            check(edvr::menuPanelFooterRectsForTest(flat, narrowText, narrowTag) &&
+                  narrowTag[0] >= flat.capPx * 8 / 10 && narrowTag[2] <= flat.cardPx - flat.capPx * 8 / 10,
+                  "overwide version stays clipped inside the actual narrow footer content bounds");
         }
         std::printf("native_menu_test: layout %u checks, %u failures (heading %dpx in a %dpx rect)\n",
                     checks, fails, headingW, headingBoxW);

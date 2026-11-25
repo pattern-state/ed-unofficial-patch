@@ -29,9 +29,10 @@ inline void run177(Check&& check) {
 
     // ---- 1. the page's words (F188: a welcome in front of the choice) -----------------------------------------------------------------------------------------------------------------------------
     static_assert(ap::kLineChars + 1 == sizeof(edvr::MenuLine::left), "the line holds what MenuLine.left holds");
-    static_assert(ap::kPageLinesMax == edvr::kMenuMaxLines, "the page limit is the raster's");
+    static_assert(ap::kPageLinesMax == 19, "the VR prompt keeps its existing visible-line budget");
+    static_assert(ap::kPageLinesMax <= edvr::kMenuMaxLines, "shared raster storage holds the unchanged VR prompt budget");
     check(ap::kNoteCount == 13 && ap::kPageLines == 1 + 13 + 3 && ap::kPageLines == 17 && ap::kPageLines <= ap::kPageLinesMax,
-          "F188: the page is the heading, thirteen lines (the last blank, between the words and the rows) and three rows (17), inside the 18 lines one raster holds");
+          "F188: the page is the heading, thirteen lines (the last blank, between the words and the rows) and three rows (17), inside its unchanged 19-line VR prompt budget");
     bool lengthsOk = true;
     size_t longest = 0;
     for (int i = 0; i < ap::kNoteCount; ++i) {
@@ -277,6 +278,9 @@ inline void run177(Check&& check) {
             }
             return n;
         };
+        check(count(cpp, "constexpr int kVisibleRows = 9;") == 1 &&
+                  count(cpp, "p.visibleRows = aimprompt::kPageLines;") == 1,
+              "F177: ordinary VR keeps nine visible rows; the 17-line prompt uses its own budget, independent of storage");
         check(!cpp.empty() && !ini.empty() && !flat.empty(), "F177: menu.cpp, edvr.ini and src/common/flat_profile_keys.h are read (run from the repository root)");
         check(count(cpp, "aimPromptTick(now);") == 1 && count(cpp, "const aimprompt::Decision d = aimprompt::decide(t);") == 1 && count(cpp, "kSettle") == 0 && count(cpp, "aimPromptSceneMs") == 0 &&
                   count(cpp, "aimPromptFailedAfterScene") == 0 && count(cpp, "sceneArrived()") == 2,

@@ -34,6 +34,8 @@ struct FlatPageRow {
 inline constexpr FlatPageRow kFlatPageRows[] = {
     {"fix", "temporal_aa",       FlatRowRead::RequestedMode},
     {"fix", "temporal_aa_model", FlatRowRead::Allowlist},
+    {"fix", "fsr4_quality",      FlatRowRead::Allowlist},
+    {"fix", "fsr4_render_scale", FlatRowRead::Allowlist},
     {"fix", "render_sharpness",  FlatRowRead::Allowlist},
     {"fix", "ui_quality",        FlatRowRead::Allowlist},
     // HUD Anti-Aliasing (2026-10-24), directly under UI quality: flat only. Its `menu flat_performance` token (tools\gen_settings_schema.py) is a page VR's

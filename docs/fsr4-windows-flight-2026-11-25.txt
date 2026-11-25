@@ -1,13 +1,35 @@
 Windows and Quest 3 FSR 4.1.2 baseline — 25 November 2026
 
-Status
+## Status
+
+The original flights below describe the preserved baseline. The first live
+render-quality candidate passed native/GPU validation but failed flat acceptance
+on 25 November: FSR 4.1.2 submitted 2880x810 to 3840x1080 successfully, while
+preset/custom changes left actual supersampling at 0.75. The controller read the
+scope-filtered AA getter, which deliberately returns off in flat mode. Duplicate
+status and overlapping footer text also failed visual acceptance.
+Corrections and production-path regressions passed full native build T15
+attempt 2 and final GPU validation. The corrected candidate was installed,
+verified and launched flat. After a later driver-install interruption, the
+17:49:53 session demonstrated live resizing and Game restoration. Other
+acceptance scenarios and VR remain pending.
+Source fingerprint: 1dca48ff5ab7993675d913824fc4db2bb24d32cbeebadae4feae1022831243c3.
+Candidate identity and flight log are in external test-candidate-2.json.
+The first correction build failed because the new config fixture leaked an
+override-change notification; test-only cleanup fixed it and the full rerun
+passed. No production reload change was made.
+David approved committing and pushing the tested source to the fork after the
+successful flat flight. The frozen delivery plan records earlier constraints;
+this approval supersedes its no-commit/no-push wording.
+The D3D debug layer was unavailable in the first validation run; optional
+debug-layer checks did not run.
 
 fsr4-1-2 preserves the source used for the successful Windows flights.
 fsr4-1-1 preserves later experiments awaiting Flight B validation.
 Both branches pin AMD SDK 2.4 and prefer the 4.1.2 provider. The historical
 4.1.1 branch name refers to the provider available during Proton testing.
 
-Build provenance
+## Build provenance
 
 The installed build was compiled from a50b0100 with three local file edits.
 The recovered input fingerprint matches its original compile-only receipt:
@@ -22,7 +44,8 @@ Installed OpenXR runtime DLL SHA-256:
 0ce254309e03eaa5e86cf5200a65a3501089fa94164c24ebd20eaaa2286c7d3c
 Both match the recovered original build outputs byte for byte.
 Compiler provenance is Wine/MSVC compile-only. The Windows flights establish
-the observations below. A full native Windows validation build remains pending.
+the observations below. This original baseline retains compile-only build
+provenance; the new candidate's native validation is recorded separately below.
 A rebuild from these commits will have a different embedded Git version.
 
 Observed flights
@@ -89,7 +112,85 @@ fsr4ServedLabel infers 'driver provider' from a version mismatch. That does
 not independently establish where the provider binary came from. A future
 diagnostics change should distinguish observed version from inferred origin.
 
-Source references
+## Live render-quality validation and flat flight
 
-https://github.com/characterecho-sean/ed-unofficial-patch/commit/494b4ed014f2370ed01719d8158a45e1a88d097d
-https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/7539ae8b6568ad29ed78a753404351daf3b5cca7/Samples/Upscalers/FidelityFX_FSR/internal/fsrapirendermodule.cpp
+The controls are implemented for flat and VR. Only flat live resizing has been
+flown successfully; Quest/SteamVR live-control acceptance remains outstanding.
+Earlier VR flights above validate the FSR baseline, not the new live controller.
+
+The flown source was based on f0b40e6c plus the uncommitted changes published
+with this note. Full native validation T15 attempt 2 passed all 199 jobs.
+MSVC 14.44.35207, Windows SDK 26100 and AMD SDK 2.4.0 were used.
+The combined source was validated; individual intermediate commits were not
+separately built. No source change was made to fix the startup refusal below.
+
+Flown input fingerprint (includes ignored SDK dependencies):
+1dca48ff5ab7993675d913824fc4db2bb24d32cbeebadae4feae1022831243c3
+Graphics DLL SHA-256:
+2f1734c25293596180e03b8c8d9422e49866dbf7b70d4cc32a87293567d463db
+The running DLL identifies itself as v0.22.0-rc.7-308-gf0b40e6c-dirty,
+PE build 6B071786, linked 2026-11-25 17:14:46 UTC. Publishing commits does
+not relabel or replace that already-running binary.
+
+Native GPU qualification on RX 9070 XT, driver 32.0.32029.2010:
+- Actual provider: FSR 4.1.2, adapter vendor 1002 / device 7550.
+- Final DLL output rig: 179 checks, 18 eye submissions, zero failures.
+- Strict engine rig: 172 evaluations across two sessions, zero failures.
+- Both native processes exited 0; no fallback or focus events were observed.
+- The D3D debug layer was unavailable; optional debug-layer checks did not run.
+
+Local full logs, receipt and payload hashes are retained outside the repository
+under C:\Dev\EDUP-Validation\fsr4-quality-2026-11-25:
+test-candidate-2.json, T15-full-build-attempt2.log,
+T15-final-gpu-qualification.json and flat-flight-2/.
+Private full game logs and redistributable SDK binaries are not committed.
+
+Observed flat flight: edvr_gfx_20261125_174953.log. David reported that it
+looked as though it worked. At the 18:09 UTC log check, 28 controller
+transitions reached Applied (submitted), with matching actual game SS and
+FSR submissions. Output stayed at 3840x1080.
+
+Setting              Input size       Output size
+Quality              2560x720         3840x1080
+Balanced             2258x635         3840x1080
+Performance          1920x540         3840x1080
+Custom 0.99          3801x1069         3840x1080
+Native / 1.00        3840x1080         3840x1080
+
+Custom 0.90 through 1.00 applied in both directions. At 18:06:50, selecting
+Game restored SS 0.75 and 2880x810; Native then applied again. This establishes
+live input resizing and Game restoration in that flat flight. It does not
+establish every lifecycle scenario or any new VR live-control behaviour.
+No new screenshot or recording was inspected during this log check.
+
+Failures retained in the evidence:
+- The first candidate passed native/GPU checks but stayed in Game during flat
+  preset changes. It used the scope-filtered AA accessor, which deliberately
+  returns off in flat mode. The corrected publisher uses requestedTemporalMode.
+  A real-Config regression reproduced five failures before the correction.
+- The first overlay duplicated quality status and overlapped footer controls
+  with the dirty version label. Production composition/layout regressions
+  reproduced four failures; the corrected layout passed 28 checks.
+- The new config regression initially leaked its override-change notification
+  into a later file-reload test. Test cleanup fixed the two full-suite failures;
+  no production reload behaviour was changed.
+- At 17:49:54, startup reported game resize callback not observed before owner
+  discovery. It subsequently recovered and applied the request. This remains
+  a known startup-status issue for the next change.
+
+## Remaining live acceptance
+
+Use the development installation only. F8 exposes FSR 4 quality and FSR 4
+custom scale; select Custom to edit the fraction from 1/3 to 1. A saved choice
+is not proof of application: require matching dimensions and Applied
+(submitted). Historical observations do not acknowledge the current request.
+
+Flat follow-up: inspect the updated overlay visually, then exercise alt-tab,
+window resize, invalid input, AA off/on, profile reload and genuine game SS
+changes while managed. Preserve output size and verify Game restoration.
+
+VR: connect Quest 3 through Steam Link/SteamVR before launch and verify real
+VR startup. Test Native AA -> Custom 0.75 -> 0.5 -> 0.75 -> 0.99 -> Native AA
+-> Game. Require fresh submissions from both eyes, stable output/FOV and
+correct HUD, panels and cursor sizing. Check maps and on-foot/screen routes
+separately; screen/world submission does not prove either eye.

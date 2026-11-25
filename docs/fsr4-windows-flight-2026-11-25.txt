@@ -1,0 +1,95 @@
+Windows and Quest 3 FSR 4.1.2 baseline — 25 November 2026
+
+Status
+
+fsr4-1-2 preserves the source used for the successful Windows flights.
+fsr4-1-1 preserves later experiments awaiting Flight B validation.
+Both branches pin AMD SDK 2.4 and prefer the 4.1.2 provider. The historical
+4.1.1 branch name refers to the provider available during Proton testing.
+
+Build provenance
+
+The installed build was compiled from a50b0100 with three local file edits.
+The recovered input fingerprint matches its original compile-only receipt:
+1e0edcd9525e98d300090ece4990b0e6f0bb0783035bb7d7aa3389d9564d89ab
+The recovered edits expose the temporary jitter menu and fix an INI comment.
+620dc17b has identical committed code to a50b0100 and four documentation
+differences. These edits are now preserved on the 4.1.2 line.
+
+Installed graphics DLL SHA-256:
+7539f9167bf50e84658e6569a15674433fdc52c67d8c0bcac0dce9241eff5471
+Installed OpenXR runtime DLL SHA-256:
+0ce254309e03eaa5e86cf5200a65a3501089fa94164c24ebd20eaaa2286c7d3c
+Both match the recovered original build outputs byte for byte.
+Compiler provenance is Wine/MSVC compile-only. The Windows flights establish
+the observations below. A full native Windows validation build remains pending.
+A rebuild from these commits will have a different embedded Git version.
+
+Observed flights
+
+Windows 11 Pro, Ryzen 7 9800X3D, Radeon RX 9070 XT.
+Samsung Q9 OLED as reported by David, 5120x1440 output, 144 Hz.
+Quest 3 through Steam Link and SteamVR OpenXR, 90 Hz.
+
+Flat FSR 4.1.2 dispatched 3840x1080 -> 5120x1440 with Elite AA off.
+David reported regularly above 130 FPS in flight and roughly 120 +/-5 on foot.
+VR FSR 4.1.2 dispatched both eyes at 2528x2704 -> 2528x2704 (Native AA).
+David found the image very good and the flight comfortable.
+
+Earlier driver 32.0.31044.16 gave 52.8 application FPS over 330 seconds of
+focused VR rendering. After Adrenalin 26.11.2 / 32.0.32029.2010, the flight
+averaged 72.8 FPS across eight minutes, with 30-second averages of 54.0–82.3.
+Docked rendering at Cheranovsky City averaged about 40 FPS for two minutes.
+Routes and views differed between runs, so these figures do not isolate a
+driver improvement. Headset refresh and application FPS are distinct measures.
+
+Changing Elite Supersampling to 0.5 was held at 1.0 by the VR gate.
+Reduced-resolution VR remains untested. HMD Image Quality controls that input.
+Frame generation remains untested.
+
+Logs in the Windows development game's edvr_logs directory:
+edvr_gfx_20261124_222547.log
+edvr_gfx_20261124_235305.log
+edvr_openxr_20261124_235306_579_36068.log
+edvr_gfx_20261125_002433.log
+edvr_openxr_20261125_002434_693_11404.log
+
+The WSL installer initially wrote Linux DLL paths into edvr_openxr.ini.
+Correcting loader and graphics to Windows paths enabled VR.
+A later launch returned startup error 124 and recovered after restart.
+Normal close requests sometimes left the process running. These remain open.
+
+Value in fsr4-1-1 at f36e3893
+
+8ce3762e changes the camera plane order to physical near/far order, matching
+AMD's SDK sample. This is a justified candidate for targeted validation.
+1d93b6eb and 913d2f2c change the flat HDR default to fixed exposure 1.0,
+with an A/B key. Their visual benefit remains unverified. VR keeps auto exposure.
+a5aa1f65, 652b70a5 and 8da28d6d add debug views, effect-specific GlobalDebug
+registration and AMD input checking. These provide useful investigation tools.
+The longer FSR jitter experiment was reverted after a large FPS loss.
+Its final tests and the performance finding remain useful.
+The Flight B checklist is open. These later rendering changes were absent
+from the successful Windows baseline.
+
+Relationship to upstream
+
+Upstream main 494b4ed014f2370ed01719d8158a45e1a88d097d pins the same two AMD
+runtime DLL hashes as this baseline. Both use a D3D11-to-D3D12 shared-resource
+bridge and AMD ffxDispatch. DittoSR is a separate option.
+Main chooses the highest provider with major >=4. This branch prefers 4.1.2.
+Main adds direct shared views to flat_mono_resolve and improves queue ordering
+and teardown. The VR on-foot world route also calls flat_mono_resolve.
+Cockpit-eye temporal_pass calls still use the bridge's copy path.
+Main also fixes context release on leaving FSR4 in the VR world route.
+Main has not been compared in matched flights on this machine.
+
+The fork's provider menu diagnostics remain useful, with one caveat:
+fsr4ServedLabel infers 'driver provider' from a version mismatch. That does
+not independently establish where the provider binary came from. A future
+diagnostics change should distinguish observed version from inferred origin.
+
+Source references
+
+https://github.com/characterecho-sean/ed-unofficial-patch/commit/494b4ed014f2370ed01719d8158a45e1a88d097d
+https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/7539ae8b6568ad29ed78a753404351daf3b5cca7/Samples/Upscalers/FidelityFX_FSR/internal/fsrapirendermodule.cpp

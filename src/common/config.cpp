@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <functional>
 #include <map>
@@ -166,6 +167,8 @@ bool Config::switchProfile() {
     {
         WriteGuard g(m_lock);
         changed = next != m_path;
+        m_profile = g_runtimeProfile.load();
+        ++m_profileEpoch;
         m_path = next;
         // A runtime override belongs to the profile it was made in: the other one reads another file.
         if (m_impl && !m_impl->overrides.empty()) {
@@ -178,6 +181,36 @@ bool Config::switchProfile() {
     }
     parse(true);
     return changed;
+}
+
+SettingsWriteTarget Config::captureWriteTarget() const {
+    ReadGuard g(m_lock);
+    SettingsWriteTarget target;
+    if (m_path.empty() || !m_profileEpoch) return target;
+    target.profile = m_profile;
+    target.epoch = m_profileEpoch;
+    target.path = m_path;
+    target.leaf = m_profile == RuntimeProfile::Flat ? kIniNameFlatW : kIniNameVrW;
+    if (m_profile == RuntimeProfile::Flat && std::strcmp(iniNameOfPath(m_path), kIniNameVr) == 0) {
+        target.fallbackSource = m_path;
+        const size_t slash = m_path.find_last_of(L"\\/");
+        target.path = m_path.substr(0, slash + 1) + kIniNameFlatW;
+        target.allowSeed = true;
+    }
+    return target;
+}
+
+bool Config::completeWriteTarget(const SettingsWriteTarget& target) {
+    {
+        WriteGuard g(m_lock);
+        if (!target.bound() || m_profile != target.profile || m_profileEpoch != target.epoch) return false;
+        // A newly seeded flat document takes over within this profile lifetime.
+        // This is not a profile switch: preserve AA overrides and the epoch.
+        m_path = target.path;
+        m_lastWrite = FILETIME{};
+    }
+    parse();
+    return true;
 }
 
 void Config::init(const std::wstring& moduleDir) {
@@ -202,6 +235,8 @@ void Config::init(const std::wstring& moduleDir) {
     {
         WriteGuard g(m_lock);
         m_path = chosen;
+        m_profile = g_runtimeProfile.load();
+        ++m_profileEpoch;
     }
     parse();
 

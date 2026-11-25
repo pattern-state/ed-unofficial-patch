@@ -18,6 +18,7 @@
 #include <string>
 
 #include "ini_name.h"
+#include "settings_write_target.h"
 #include "runtime_profile.h"
 
 namespace edvr {
@@ -58,6 +59,10 @@ public:
     // Re-picks the settings file for the profile now active (the caller flips it first) and reads it from defaults. True when the file changed.
     // Needs init() first. Called on the render thread at a frame boundary, never from a getter.
     bool switchProfile();
+    SettingsWriteTarget captureWriteTarget() const;
+    // Called on the frame thread. A stale completion never reloads another profile.
+    bool completeWriteTarget(const SettingsWriteTarget& target);
+
 
     // A number that differs whenever the values may differ: it moves with every parse that swaps a new map in (reloadIfChanged, init) and with every set(). A
     // module that keeps parsed settings re-reads them when the number is not the one it read them under -- read the number BEFORE the values, so a swap that lands
@@ -157,6 +162,8 @@ private:
     std::wstring m_moduleDir;
     // Written under the exclusive lock; read under either (path(), iniName(), reloadIfChanged, parse).
     std::wstring m_path;
+    RuntimeProfile m_profile = RuntimeProfile::Invalid;
+    uint64_t m_profileEpoch = 0;
     std::wstring m_logDir;
     FILETIME     m_lastWrite{};
 

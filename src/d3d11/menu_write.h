@@ -1,6 +1,7 @@
 // The F8 writer's jobs and completion path, shared with the device-free menu rig.
 #pragma once
 #include <cstdint>
+#include "../common/settings_write_target.h"
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,6 +12,7 @@ namespace edvr {
 enum class WriteDestination : uint8_t { BuiltinRow, PluginSetting, AddonApproval, Pairs };
 
 struct WriteJob {
+    SettingsWriteTarget target;
     WriteDestination destination = WriteDestination::BuiltinRow;
     int         def = -1;
     std::string dotted;
@@ -28,6 +30,10 @@ struct WriteJob {
     std::string dropped;
     uint32_t    gen = 0;   // EditGeneration: rollback only if no newer row edit exists
 };
+inline bool menuWritesCoalesce(const WriteJob& a, const WriteJob& b) {
+    return a.pairs.empty() && b.pairs.empty() && a.destination == b.destination &&
+        a.def == b.def && a.dotted == b.dotted && sameWriteTarget(a.target, b.target);
+}
 struct WriteDone {
     WriteJob    job;
     bool        ok;
@@ -50,7 +56,12 @@ WriteDone runMenuWrite(const WriteJob& job, Persist persist) {
 template<class State, class Definitions, class Rows, class ValueOf, class PendingOf, class Note>
 void completeMenuWrite(const WriteDone& w, State& s, const Definitions& kMenuRows,
                        Rows& g_rows, int rowCount, ValueOf rowValue, PendingOf rowPending,
-                       Note note, const char* iniName) {
+                       Note note, const char* iniName, bool currentTarget = true) {
+    if (!currentTarget) {
+        note("menu: %s = %s (%s %s; originating profile is no longer active).",
+             w.job.dotted.c_str(), w.job.value.c_str(), w.ok ? "written to" : "save not confirmed for", iniName);
+        return;
+    }
     if (w.job.destination != WriteDestination::BuiltinRow) {
         const bool approval = w.job.destination == WriteDestination::AddonApproval;
         if (w.ok) {

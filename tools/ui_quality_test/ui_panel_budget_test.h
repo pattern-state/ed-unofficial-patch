@@ -803,7 +803,7 @@ std::vector<Pin> pins(const std::string& scale, const std::string& surfaces, con
                    "the 30 s panel line carries the net's count in every state, a zero printed as a zero"});
     out.push_back({"gather-base", has(gather, "in->displayW=uiSurfacesDisplayWidth();") && has(gather, "in->screenW=vscreenModeAppliedWidth();"),
                    "gatherInputs hands the plan the display's width and the 2D screen's forced width"});
-    out.push_back({"plan-written", inOrder(frame, {"uiPanelPlanFor(in,&plan)", "constdoublef=plan.f;", "writeFloats(f,plan.lineF,plan.ss)"}) &&
+    out.push_back({"plan-written", inOrder(frame, {"uiPanelPlanFor(in,&plan)", "constdoublef=plan.f;", "writeFloatsUnlocked(f,plan.lineF,plan.ss)"}) &&
                                        !has(frame, "uiPanelFactor("),
                    "the frame boundary writes the plan's own f, with its line factor and Supersampling, and makes no second factor"});
     out.push_back({"adjusted-line", has(frame, "if(plan.ssActs||plan.budgetActs)") && has(scale, "factor adjusted -- Elite's Supersampling is %.2f"),
@@ -844,7 +844,7 @@ void testWiring() {
     struct Control { const char* pin; int file; const char* from; const char* to; };
     const Control controls[] = {
         {"gather-ss", 0, "in->supersampling = uiSurfacesSupersampling();", "in->supersampling = 1.0f;"},
-        {"plan-written", 0, "writeFloats(f, plan.lineF, plan.ss)", "writeFloats(f)"},
+        {"plan-written", 0, "writeFloatsUnlocked(f, plan.lineF, plan.ss)", "writeFloatsUnlocked(f, 1.0, 1.0)"},
         {"plan-written", 0, "!uiPanelPlanFor(in, &plan)", "!uiPanelFactor(in, nullptr)"},
         {"adjusted-line", 0, "if (plan.ssActs || plan.budgetActs)", "if (false)"},
         {"reread", 1, "g_ssaaBits.store(ssBits, std::memory_order_release);", ""},

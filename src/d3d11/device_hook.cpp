@@ -54,6 +54,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "onfoot_recorder.h"   // F213: onfootrec::mark, the on-foot mark key's job
 #include "native_on_foot_hooks.h"   // nativeOnFootHooksFrameBoundary (the frame tick) and nativeOnFootHooksShutdown (the avatar dither-fade global goes back at an unload)
 #include "ui_surfaces.h"   // the glyph atlas and sizing chain instruments
+#include "game_render_scale.h"
 #include "ui_panel_scale.h" // uiPanelScaleShutdown: the panel operands put back
 #include "ui_sizing_math.h" // uiDisplaySizeFromXml: DisplaySettings.xml, for the panel budget
 #include "vr_ssaa_gate.h"   // the step-1 Supersampling gate instruments (log only)
@@ -1237,6 +1238,8 @@ HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT c
 // frame. What is not under a budget is arithmetic and flag reads that cannot
 // fault: the frame counter, the graphics-off test, whether the config poll is due.
 EDVR_BOUNDARY_TICK(tkModeWatch, "mode_watch");
+EDVR_BOUNDARY_TICK(tkRenderScaleLifecycle, "render_scale_lifecycle");
+EDVR_BOUNDARY_TICK(tkRenderScaleObservation, "render_scale_observation");
 EDVR_BOUNDARY_TICK(tkFlatOriginCapture, "flat_origin_capture");
 EDVR_BOUNDARY_TICK(tkCrossProfile, "cross_profile");
 EDVR_BOUNDARY_TICK(tkKinematicProbe, "kinematic_probe");
@@ -1563,7 +1566,41 @@ void tickFrameFlagPeer() {
     }
 }
 
-void presentFrameBoundary() {
+void publishGameRenderScaleIntent() {
+    static bool published = false;
+    static uint64_t sequence = 0, profileGeneration = 0;
+    static RuntimeProfile previousProfile = RuntimeProfile::LegacyVr;
+    static renderscale::RequestIntent previous{};
+    Config& cfg = Config::get();
+    renderscale::RequestIntent intent{};
+    if (!renderscale::readRequestIntent(cfg, runtimeVrProfile(),
+                                       runtimeFeaturesAllowed() && !graphicsRuntimeDisabled(), intent)) return;
+    const auto profile = runtimeProfileValue();
+    if (!published || profile != previousProfile) ++profileGeneration;
+    intent.profileGeneration = profileGeneration;
+    if (published && intent.vr == previous.vr && intent.fsrEnabled == previous.fsrEnabled &&
+        intent.profileGeneration == previous.profileGeneration && intent.quality.preset == previous.quality.preset &&
+        intent.quality.customScale == previous.quality.customScale && intent.quality.valid == previous.quality.valid &&
+        intent.quality.reason == previous.quality.reason) return;
+    intent.sequence = ++sequence;
+    previous = intent; previousProfile = profile; published = true;
+    gameRenderScalePublish(intent);
+}
+
+renderscale::OutputBasis gameRenderScaleOutputBasis() {
+    renderscale::OutputBasis output{};
+    if (runtimeFlatProfile()) {
+        uint32_t renderW = 0, renderH = 0;
+        output.settled = flatRuntimeSceneSizes(&renderW, &renderH, &output.width, &output.height);
+    } else {
+        uint32_t askedW = 0, askedH = 0;
+        output.settled = nativeTemporalRecommended(&output.width, &output.height) &&
+            nativeTemporalAsked(&askedW, &askedH) && askedW == output.width && askedH == output.height;
+    }
+    return output;
+}
+
+void presentFrameBoundary(bool qualityOwned, bool qualityEligible) {
     // THE FRAME NUMBER, ADVANCED AND PUBLISHED BEFORE ANYTHING USES IT.
     //
     // FRAME N IS EVERYTHING BETWEEN PRESENT N-1 RETURNING AND PRESENT N
@@ -1585,6 +1622,11 @@ void presentFrameBoundary() {
     tkCrossProfile.run([] { perfMonitorCrossProfileFrame(); });
     // The 3D mode watch's commit (mode_watch.h): a posted mode is applied here, at the one point no draw of the next frame has started.
     tkModeWatch.run([] { modeWatchFrameBoundary(); });
+    tkRenderScaleLifecycle.run([qualityOwned] {
+        if (!qualityOwned) return;
+        publishGameRenderScaleIntent();
+        gameRenderScaleLifecycleTick(runtimeFeaturesAllowed() && !graphicsRuntimeDisabled());
+    });
     tkFlatOriginCapture.run([] {
         // A failed config read leaves the latch unset/off; only this diagnostic
         // tick retries or stands down. It cannot retire profile selection.
@@ -1791,6 +1833,11 @@ void presentFrameBoundary() {
         // reclaim passes: a diagnostic's faults must not stand a repair down.
         tkFormatSupport.run([] { formatSupportTick(); });
     }
+    tkRenderScaleObservation.run([qualityOwned, qualityEligible] {
+        if (!qualityOwned) return;
+        publishGameRenderScaleIntent();
+        gameRenderScaleFrameBoundary(qualityEligible, gameRenderScaleOutputBasis());
+    });
 }
 
 HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
@@ -1931,7 +1978,8 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     g_frameTicks.markAt("present_post", boundaryT0);
     g_frameTicks.boundary(true);
     // Each tick runs under a budget of its own (boundary_tick.h).
-    presentFrameBoundary();
+    const bool qualityOwned = renderBoundaryOwnsPresentThread(dev);
+    presentFrameBoundary(qualityOwned, qualityOwned && hr == S_OK && !(flags & DXGI_PRESENT_TEST));
     const int64_t boundaryT1 = qpcNow();
     // Whatever the boundary did after its last tick (all of it, when
     // graphicsRuntimeDisabled cut it short), and the end of the boundary's ticks.
@@ -3006,6 +3054,9 @@ void hookDevice(ID3D11Device* device) {
             // order.
             installGlitchFrameFix();
             installVScreenFixes(device, ctxMode);
+            const char* qualityWhy = nullptr;
+            if (!gameRenderScaleInstall(&qualityWhy))
+                Log::get().note("render quality: resize hook refused: %s", qualityWhy ? qualityWhy : "unknown reason");
             // visual.intro_video = skip in the flat profile (2026-10-14): armed here, at device creation, before the game opens the ident. vScreen's
             // own install does it too when it has a State; this call does not depend on that and is idempotent beside it.
             if (runtimeFlatProfile()) introSkipConfigure(Config::get());
@@ -3338,6 +3389,7 @@ DeviceCreates deviceCreatesTake() {
 }
 
 void shutdownDeviceHooks() {
+    gameRenderScaleShutdown();
     storeHookSetFlatWorldProbe(false,0);
     flatWorldWitnessShutdown();
     flatTemporalStop();

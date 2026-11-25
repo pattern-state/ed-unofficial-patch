@@ -3,6 +3,7 @@
 // their verdicts, ui_quality_math.h the render width and the panel shape,
 // both shared with tools/ui_quality_test.
 #include "ui_surfaces.h"
+#include "game_render_scale.h"
 
 #include "ui_quality_math.h"  // uiQualityInternalDim, uiQualityFovTangent, uiQualityCandidateShape
 #include "ui_sizing_math.h"   // the confirmation instrument: chains and verdicts
@@ -51,11 +52,16 @@ std::atomic<bool> g_hmdBusy{false};
 std::atomic<uint32_t> g_ssaaBits{0};
 std::atomic<uint32_t> g_displayW{0};
 
-float hmdCached() {
+float hmdFileCached() {
     const uint32_t bits = g_hmdBits.load(std::memory_order_acquire);
     float v = 0.0f;
     std::memcpy(&v, &bits, sizeof(v));
     return v;
+}
+
+float effectiveHmdQuality() {
+    float value = 0;
+    return gameRenderScaleObservedHmd(&value) ? value : hmdFileCached();
 }
 
 void hmdReadNow() {
@@ -111,7 +117,7 @@ Basis readBasis() {
     } else if (!nativeTemporalRecommended(&w, &h)) {
         w = h = 0;
     }
-    const float hmd = hmdCached();
+    const float hmd = effectiveHmdQuality();
     b.W = uiQualityInternalDim(w, hmd);
     b.H = uiQualityInternalDim(h, hmd);
     if (!b.W || !b.H) b.W = b.H = 0;
@@ -343,7 +349,7 @@ void uiSurfacesPanelNetCounts(uint32_t* fired, uint32_t* distinct) {
     if (distinct) *distinct = g_netDistinct.load(std::memory_order_relaxed);
 }
 
-float uiSurfacesHmdQuality() { return hmdCached(); }
+float uiSurfacesHmdQuality() { return effectiveHmdQuality(); }
 
 float uiSurfacesSupersampling() {
     const uint32_t bits = g_ssaaBits.load(std::memory_order_acquire);

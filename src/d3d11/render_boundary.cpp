@@ -141,6 +141,18 @@ bool renderBoundaryValidateOwner(ID3D11Device* device,
     }
 }
 
+bool renderBoundaryOwnsPresentThread(ID3D11Device* device) noexcept {
+    if (!device) return false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_owner) return g_owner->threadRecorded && GetCurrentThreadId() == g_owner->renderThread &&
+            sameIdentity(static_cast<IUnknown*>(device), g_owner->device.Get()) &&
+            sameIdentity(static_cast<IUnknown*>(device), g_owner->firstPresentIdentity.Get());
+        return g_firstPresentRecorded && GetCurrentThreadId() == g_firstPresentThread &&
+            sameIdentity(static_cast<IUnknown*>(device), g_firstPresentIdentity.Get());
+    } catch (...) { return false; }
+}
+
 void renderBoundaryNoteOwnedPresent(ID3D11Device* device) noexcept {
     if (!device) return;
     try {
@@ -250,4 +262,8 @@ extern "C" HRESULT WINAPI edvrAcquireRenderBoundary(
         FreeLibrary(module);
         return E_FAIL;
     }
+}
+
+extern "C" __declspec(dllexport) bool edvr_selftest_render_boundary_owner(ID3D11Device* device) noexcept {
+    return edvr::renderBoundaryOwnsPresentThread(device);
 }

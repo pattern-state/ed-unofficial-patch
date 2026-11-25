@@ -1872,13 +1872,21 @@ def self_test():
               "audit: an exact-only file's address resolved elsewhere passes")
         for name in ("native_on_foot.cpp", "native_on_foot_hooks.cpp", "avatar_hooks_core.h", "avatar_skeleton_core.h",
                      "native_on_foot_f87.h", "native_on_foot_f111.h", "native_on_foot_f114b.h", "native_on_foot_f116.h",
-                     "native_on_foot_f154.h"):
+                     "native_on_foot_f154.h", "game_render_scale_pins.h", "game_render_scale_binding.cpp"):
             check(audited(name, "bool f(uint32_t stamp){ return stamp == 0x6ADA8048u; }\n"
                                 "uintptr_t g(uintptr_t b){ return b + 0x4315000u; }") == [],
                   "audit: the exact-build native file %s retains its identity and raw addresses" % name)
-        for name in ("native_on_foot_future.h", "native_on_foot_f999.h", "avatar_hooks_future.h", "explorer_cam_future.h"):
+        for name in ("native_on_foot_future.h", "native_on_foot_f999.h", "avatar_hooks_future.h", "explorer_cam_future.h",
+                     "game_render_scale_future.h", "game_render_scale_binding_future.cpp"):
             check(any(": routed: " in p for p in audited(name, "uintptr_t f(uintptr_t b){ return b + 0x4314C60u; }")),
                   "audit: a new similarly named file %s is not exact-only" % name)
+        (s / "d3d11" / "game_render_scale_pins.h").write_text(
+            "namespace renderscale_audit { constexpr uint32_t kRenderScaleAuditRva = 0x4314C60u; }\n",
+            encoding="utf-8")
+        check(any(": routed: " in p for p in audited("render_scale_consumer.cpp",
+              "uintptr_t f(uintptr_t base) { return base + renderscale_audit::kRenderScaleAuditRva; }")),
+              "audit: reviewed render-scale address still requires routing outside its exact adapter")
+        (s / "d3d11" / "game_render_scale_pins.h").unlink()
         check(audited("draw_record_tag.h", "constexpr uint32_t kSalt = 0x00A5C35Au;\n"
                                              "uint32_t f(uint32_t s){ return s ^ kSalt; }") == [],
               "audit: the draw-record sentinel salt is not an address")
@@ -1969,6 +1977,10 @@ AUDIT_RESOLVER = ("common/game_build.h", "common/game_build.cpp", "common/game_b
 # Exact-build only, by the maintainer's decision (docs/design-game-update-signatures-2026-10-25.md,
 # step 3). They may key on the identity and add the module base to their own constants.
 AUDIT_EXACT_ONLY = (
+    ("d3d11/game_render_scale_pins.h", "reviewed build-334925-only render-scale adapter: PE identity, registered requester, dirty/configure, copied mode, SS clamp and HMD manager witnesses; "
+     "docs/build-334925.md records the independent executable hash and retargeting provenance; no unknown-build support"),
+    ("d3d11/game_render_scale_binding.cpp", "the same reviewed external-image adapter checks the exact PE identity, every instruction witness, requester registration and manager vtable/aliases "
+     "before admitting current game objects; the facade separately requires gameBuildKnown and module pinning; signature matching alone cannot validate its field layout"),
     ("common/elite_oculus_profile.h", "the Oculus route profile stays exact-build only"),
     ("d3d11/oculus_route.cpp", "the Oculus route, which reads that profile"),
     # Explorer Cam was deleted; its avatar hooks now belong to native on foot. These existing files keep their own identity gates and unwitnessed struct layouts,

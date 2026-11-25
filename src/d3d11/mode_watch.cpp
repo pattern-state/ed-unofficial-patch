@@ -14,6 +14,7 @@
 #include "perf_monitor.h"       // perfMonitorProfileSwitch: the frame interval restarts at a switch
 #include "ui_layer.h"           // uiLayerProfileSwitch: the VR UI layers, torn down before a commit leaves VR
 #include "xess_engine.h"        // xessReleaseFeatures: XeSS's features, released at every switch
+#include "game_render_scale.h"
 #include "vr_ssaa_hold.h"       // vrSsaaHoldProfileChanged: the Supersampling hold follows the profile
 
 #include "../common/config.h"
@@ -452,6 +453,7 @@ void commitPosted(uint64_t packed) {
     }
     g_switches.fetch_add(1, std::memory_order_relaxed);
 
+    gameRenderScaleProfileChanged();
     runtimeProfileSet(target);
     setVrProfileActive(target == RuntimeProfile::Vr || target == RuntimeProfile::LegacyVr);
     Config::get().switchProfile();

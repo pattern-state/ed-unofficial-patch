@@ -2,6 +2,8 @@
 // and why; ui_sizing_math.h holds the arithmetic and build 334925's bytes,
 // shared with tools/ui_quality_test.
 #include "ui_panel_scale.h"
+#include "ui_game_resize.h"
+#include "game_render_scale.h"
 
 #include "ui_quality_math.h"  // uiQualityFovTangent, uiQualityInternalDim, uiQualityRecommendedFromEyes
 #include "ui_sizing_math.h"
@@ -61,6 +63,8 @@ double g_lastSsEff = 1.0;  // max(Supersampling, 1) in the last write: a move of
 // replaced by thunks that forward untouched; they remember the render context the interface object holds, and
 // the setter's moves the factor to the new Supersampling BEFORE the original runs (the game's reconfigure,
 // and the panels it recreates, follow the setter). Everything the thunks touch is atomic or under g_floatLock.
+std::atomic<uint64_t> g_resizeGeneration{0};
+std::atomic<bool> g_resizeInProgress{false};
 SRWLOCK g_floatLock = SRWLOCK_INIT;  // the float page's protection toggle and stores: the render thread and the thunk
 constexpr int kCtxSlots = 4;
 std::atomic<uintptr_t> g_ctx[kCtxSlots];            // distinct render contexts a hooked slot has been called on
@@ -297,7 +301,7 @@ bool writeFloatsUnlocked(double f, double lineF, double ss) {
 
 bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {
     AcquireSRWLockExclusive(&g_floatLock);
-    const bool ok = writeFloatsUnlocked(f, lineF, ss);
+    const bool ok = !g_resizeInProgress.load(std::memory_order_acquire) && writeFloatsUnlocked(f, lineF, ss);
     ReleaseSRWLockExclusive(&g_floatLock);
     return ok;
 }
@@ -306,10 +310,27 @@ bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {
 // loads and stores, the floats' write and one load of the scene's size, and nothing else: no log, no wait, no call into the game's code. `liveSs`/`liveOk` are the game's
 // live Supersampling, read by the boundary BEFORE it takes the lock.
 struct PanelEnv {
+    uint64_t generation = g_resizeGeneration.load(std::memory_order_acquire);
+    bool preparation = false;
+    bool admitted() const { return generation == g_resizeGeneration.load(std::memory_order_acquire) &&
+        (preparation || !g_resizeInProgress.load(std::memory_order_acquire)); }
     float liveSs = 0.0f;
     bool liveOk = false;
     void lock() { AcquireSRWLockExclusive(&g_floatLock); }
     void unlock() { ReleaseSRWLockExclusive(&g_floatLock); }
+    bool publicationReady() const { return g_pubReady.load(std::memory_order_acquire); }
+    void setPublicationReady(bool ready) { g_pubReady.store(ready, std::memory_order_release); }
+    uint64_t resizeGeneration() const { return g_resizeGeneration.load(std::memory_order_acquire); }
+    bool resizeInProgress() const { return g_resizeInProgress.load(std::memory_order_acquire); }
+    void restorePrevious(const UiGameResizeReceipt& receipt) {
+        if (writeFloatsUnlocked(receipt.previousFactor, receipt.previousLineFactor, receipt.previousSs)) {
+            g_live.store(receipt.previousLive, std::memory_order_release);
+            g_flatSetterAt.store(receipt.previousFlatSetterAt, std::memory_order_release);
+            g_flatSetterEpoch.store(receipt.previousFlatSetterEpoch, std::memory_order_release);
+            g_pubReady.store(receipt.previousReady, std::memory_order_release);
+        }
+    }
+    void finishTransition() { g_resizeInProgress.store(false, std::memory_order_release); }
     void seam(UiFlatSeam) {}
     // the boundary's reads
     uint32_t setterEpoch() const { return g_flatSetterEpoch.load(std::memory_order_acquire); }
@@ -319,6 +340,7 @@ struct PanelEnv {
     double lineFactorNow() const { return uiPanelScaleLineFactor(); }
     // what the setter thunk scales when the game's menu moves the Supersampling before R follows; published only beside a believable live value
     void publish(const UiPanelPlan& plan, uint32_t renderW, uint32_t renderH) {
+        if (!admitted()) return;
         if (!liveOk) {
             g_pubReady.store(false, std::memory_order_release);
             return;
@@ -336,7 +358,7 @@ struct PanelEnv {
         g_pubFlat.store(true, std::memory_order_release);
         g_pubReady.store(true, std::memory_order_release);
     }
-    bool writeFactors(double f, double lineF, double ss) { return writeFloatsUnlocked(f, lineF, ss); }
+    bool writeFactors(double f, double lineF, double ss) { return admitted() && writeFloatsUnlocked(f, lineF, ss); }
     // the setter's reads
     UiPublishedPlan published() const {
         UiPublishedPlan r;
@@ -452,7 +474,12 @@ void getterNoteThunk(void* self, float) { getterNoteImpl(self); }
 
 void __fastcall hookedSetter(void* self, float x) {
     modeWatchHint(ModeHint::Setter);  // the mode watch re-reads Settings.xml now (mode_watch.h); the setter is how Supersampling is set
-    x = vrSsaaHoldSetterValue(x);  // the Supersampling hold (vr_ssaa_hold.h): 1.0 while the 3D mode is on, else the game's value
+    const float requested = x;
+    // The existing VR hold must see the genuine request before the managed flat override.
+    const float held = vrSsaaHoldSetterValue(requested);
+    uintptr_t context = 0;
+    readGame(reinterpret_cast<const uint8_t*>(self) + kUiSsCtxFromThis, &context, sizeof(context));
+    x = gameRenderScaleFlatSetterValue(context, requested, held);
     guardedRun(setterBeforeThunk, self, x);
     const SetterFn orig = g_origSetter.load(std::memory_order_acquire);
     if (orig) orig(self, x);
@@ -757,9 +784,70 @@ bool gatherInputs(UiPanelInputs* in, uint32_t* askW, uint32_t* askH, float* hmd,
 }
 
 // The flat profile's frame boundary (defined after uiPanelScaleFrameBoundary, which calls it with the key on).
-void flatFrameBoundary(float target);
+void flatFrameBoundary(float target, uint64_t resizeGeneration);
 
 }  // namespace
+
+bool uiPanelScalePrepareGameResize(const renderscale::PlannedAction& action, UiGameResizeReceipt* receipt,
+                                   const char** why) noexcept {
+    if (!receipt) { if (why) *why = "missing panel preparation receipt"; return false; }
+    *receipt = {};
+    if (why) *why = nullptr;
+    const bool flat = action.action.owner.mode == 0;
+    const float target = g_target.load(std::memory_order_acquire);
+    if (g_patch.load(std::memory_order_acquire) != kApplied || !(target > 0) ||
+        !(flat ? g_flatTemporal.load(std::memory_order_acquire) : g_vrTemporal.load(std::memory_order_acquire))) return true;
+    PanelEnv env;
+    AcquireSRWLockExclusive(&g_floatLock);
+    if (g_resizeInProgress.load(std::memory_order_acquire)) {
+        ReleaseSRWLockExclusive(&g_floatLock);
+        if (why) *why = "panel resize already in progress";
+        return false;
+    }
+    receipt->generation = g_resizeGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    receipt->previousFactor = uiPanelScaleFactor();
+    receipt->previousLineFactor = uiPanelScaleLineFactor();
+    receipt->previousSs = uiPanelScaleSupersampling();
+    receipt->previousLive = g_live.load(std::memory_order_acquire);
+    receipt->previousFlatSetterAt = g_flatSetterAt.load(std::memory_order_acquire);
+    receipt->previousFlatSetterEpoch = g_flatSetterEpoch.load(std::memory_order_acquire);
+    uiGameResizeInvalidateSetterPublication(*receipt, env);
+    receipt->active = true;
+    g_resizeInProgress.store(true, std::memory_order_release);
+    ReleaseSRWLockExclusive(&g_floatLock);
+    UiPanelPlan plan{};
+    bool ready = false;
+    if (flat) {
+        uint32_t measuredW = 0, measuredH = 0, outputW = 0, outputH = 0;
+        ready = flatRuntimeSceneSizes(&measuredW, &measuredH, &outputW, &outputH) &&
+            uiGameResizeFlatPlan(action.inW, action.inH, outputW, outputH, target, &plan);
+    } else {
+        UiPanelInputs in{};
+        uint32_t askedW = 0, askedH = 0;
+        float hmd = 0, up = 0, down = 0, trueUp = 0, trueDown = 0;
+        const float intendedHmd = action.action.contextHmd.write ? action.action.contextHmd.target : action.action.owner.hmd;
+        const float intendedSs = action.action.ss.write ? action.action.ss.target : action.action.owner.ss;
+        ready = gatherInputs(&in, &askedW, &askedH, &hmd, &up, &down, &trueUp, &trueDown) &&
+            uiGameResizeVrPlan(in, askedW, intendedHmd, intendedSs, &plan);
+    }
+    if (!ready) { if (why) *why = "UI geometry unavailable for intended game resize"; return false; }
+    env.generation = receipt->generation;
+    env.preparation = true;
+    env.lock();
+    const bool written = env.writeFactors(plan.f, plan.lineF, plan.ss);
+    if (written) {
+        g_live.store(true, std::memory_order_release);
+        env.noteMove(flat, g_pubFlatDims.load(std::memory_order_acquire));
+    }
+    env.unlock();
+    if (!written && why) *why = "panel factor preparation failed";
+    return written;
+}
+
+void uiPanelScaleFinishGameResize(const UiGameResizeReceipt& receipt, bool anyGameFieldWritten) noexcept {
+    PanelEnv env;
+    uiGameResizeFinishSection(receipt, anyGameFieldWritten, env);
+}
 
 bool uiPanelScaleEarlyHooks(char* why, size_t whyLen) {
     const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
@@ -792,6 +880,8 @@ double uiPanelScaleLineFactor() { return doubleFromBitsOrOne(g_lineBits.load(std
 double uiPanelScaleSupersampling() { return doubleFromBitsOrOne(g_ssBits.load(std::memory_order_acquire)); }
 
 void uiPanelScaleFrameBoundary() {
+    const uint64_t resizeGeneration = g_resizeGeneration.load(std::memory_order_acquire);
+    if (g_resizeInProgress.load(std::memory_order_acquire)) return;
     ++g_frame;
     if (g_patch.load(std::memory_order_acquire) != kApplied) return;
     const float target = g_target.load(std::memory_order_acquire);
@@ -812,7 +902,7 @@ void uiPanelScaleFrameBoundary() {
     }
     // The flat profile has its own inputs (the render and display sizes; no HMD, frustum or .fxcfg).
     if (runtimeFlatProfile()) {
-        flatFrameBoundary(target);
+        flatFrameBoundary(target, resizeGeneration);
         return;
     }
     // VR with anti-aliasing off (2026-10-13): the key's panels are the game's own size, as with the key off. One line on each change.
@@ -852,15 +942,22 @@ void uiPanelScaleFrameBoundary() {
         g_settle = 0;
         return;
     }
-    // What the setter thunk makes a factor from when the game's menu moves the Supersampling.
-    {
-        uint64_t fb = 0, bb = 0;
-        std::memcpy(&fb, &plan.formula, sizeof(fb));
-        std::memcpy(&bb, &plan.base, sizeof(bb));
-        g_pubFormulaBits.store(fb, std::memory_order_release);
-        g_pubBaseBits.store(bb, std::memory_order_release);
-        g_pubReady.store(true, std::memory_order_release);
+    // Invalidation at handoff suppresses old setter plans. A fresh, generation-checked
+    // geometry snapshot republishes even when the prepared factor already matches.
+    AcquireSRWLockExclusive(&g_floatLock);
+    if (!uiGameResizeMayPublish(resizeGeneration, g_resizeGeneration.load(std::memory_order_acquire),
+                                g_resizeInProgress.load(std::memory_order_acquire))) {
+        ReleaseSRWLockExclusive(&g_floatLock);
+        return;
     }
+    uint64_t formulaBits = 0, baseBits = 0;
+    std::memcpy(&formulaBits, &plan.formula, sizeof(formulaBits));
+    std::memcpy(&baseBits, &plan.base, sizeof(baseBits));
+    g_pubFormulaBits.store(formulaBits, std::memory_order_release);
+    g_pubBaseBits.store(baseBits, std::memory_order_release);
+    g_pubFlat.store(false, std::memory_order_release);
+    g_pubReady.store(true, std::memory_order_release);
+    ReleaseSRWLockExclusive(&g_floatLock);
     const double f = plan.f;
     const UiPanelClamp clamp = plan.clamp;
     // A move of the Supersampling is written NOW (the game's reconfigure is at most a frame behind its setter);
@@ -880,7 +977,14 @@ void uiPanelScaleFrameBoundary() {
         // Against what the floats hold (the setter thunk may have moved them), not against this thread's last write.
         if (g_live.load(std::memory_order_acquire) && std::fabs(f / uiPanelScaleFactor() - 1.0) <= 0.001) return;
     }
-    if (!writeFloats(f, plan.lineF, plan.ss)) return;
+    AcquireSRWLockExclusive(&g_floatLock);
+    if (!uiGameResizeMayPublish(resizeGeneration, g_resizeGeneration.load(std::memory_order_acquire),
+                                g_resizeInProgress.load(std::memory_order_acquire)) ||
+        !writeFloatsUnlocked(f, plan.lineF, plan.ss)) {
+        ReleaseSRWLockExclusive(&g_floatLock);
+        return;
+    }
+    ReleaseSRWLockExclusive(&g_floatLock);
     g_written = f;
     g_lastSsEff = plan.ss;
     g_lastInputs = in;
@@ -949,7 +1053,7 @@ const char* flatClampText(UiPanelClamp clamp) {
 
 // The render thread, once a frame with the key on, in the flat profile. The same settle and the same floats as VR's;
 // the inputs are R and D (ui_sizing_math.h's uiFlatPanelPlanFor).
-void flatFrameBoundary(float target) {
+void flatFrameBoundary(float target, uint64_t resizeGeneration) {
     if (!g_flatTemporal.load(std::memory_order_acquire)) {
         // Anti-aliasing off: the game's own sizes (ui_panel_scale.h says why).
         g_pubReady.store(false, std::memory_order_release);
@@ -983,6 +1087,7 @@ void flatFrameBoundary(float target) {
     // The setter's epoch, the decision, the publish and the write are ONE operation under the floats' lock (uiFlatPanelBoundarySection): a setter that lands in between waits
     // for it, and one that landed before it is seen. The game's live Supersampling is read before the lock; the log is written after it.
     PanelEnv env;
+    env.generation = resizeGeneration;
     {
         float cur = 0.0f, lo = 0.0f, hi = 0.0f;
         env.liveOk = readLiveSupersampling(&cur, &lo, &hi) == UiSsRead::kOk && uiLiveSupersamplingValid(cur, lo, hi, nullptr);

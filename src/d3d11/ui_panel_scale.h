@@ -55,8 +55,19 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace edvr {
+namespace renderscale { struct PlannedAction; }
+struct UiGameResizeReceipt {
+    uint64_t generation = 0, previousFlatSetterAt = 0;
+    uint32_t previousFlatSetterEpoch = 0;
+    double previousFactor = 1, previousLineFactor = 1, previousSs = 1;
+    bool previousLive = false, previousReady = false, active = false;
+};
+bool uiPanelScalePrepareGameResize(const renderscale::PlannedAction&, UiGameResizeReceipt*, const char** why) noexcept;
+void uiPanelScaleFinishGameResize(const UiGameResizeReceipt&, bool anyGameFieldWritten) noexcept;
+
 
 // The Supersampling setter and getter hooks, installed at DLL load by vr_ssaa_hold.cpp (the Supersampling hold does not wait for
 // the key). Pure memory: the build is checked, the functions' bytes and the slots are checked, nothing is logged. True when the

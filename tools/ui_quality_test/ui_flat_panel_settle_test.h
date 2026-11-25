@@ -464,7 +464,7 @@ std::vector<Pin> pins(const std::string& scale) {
         const size_t e = s == std::string::npos ? s : scale.find("\n};\n", s);
         if (e != std::string::npos) env = squeeze(scale.substr(s, e - s + 3));
     }
-    const std::string frame = body("void flatFrameBoundary(float target) {");
+    const std::string frame = body("void flatFrameBoundary(float target, uint64_t resizeGeneration) {");
     const std::string move = body("void moveFactorTo(float ss) {");
     const std::string locked = body("bool writeFloats(double f, double lineF = 1.0, double ss = 1.0) {");
     const std::string unlocked = body("bool writeFloatsUnlocked(double f, double lineF, double ss) {");
@@ -480,7 +480,7 @@ std::vector<Pin> pins(const std::string& scale) {
     out.push_back({"env-lock", has(env, "voidlock(){AcquireSRWLockExclusive(&g_floatLock);}") && has(env, "voidunlock(){ReleaseSRWLockExclusive(&g_floatLock);}"),
                    "the sections' lock is the floats' lock, the one writeFloats has always taken"});
     out.push_back({"env-nothing-slow", !env.empty() && !has(env, "Log::") && !has(env, "readLiveSupersampling(") && !has(env, "writeFloats(") && !has(env, "readGame(") &&
-                                           !has(env, "Sleep") && !has(env, "WaitFor") && has(env, "boolwriteFactors(doublef,doublelineF,doubless){returnwriteFloatsUnlocked(f,lineF,ss);}"),
+                                           !has(env, "Sleep") && !has(env, "WaitFor") && has(env, "boolwriteFactors(doublef,doublelineF,doubless){returnadmitted()&&writeFloatsUnlocked(f,lineF,ss);}"),
                    "under the lock the Env does atomic loads and stores, the floats' write without the lock again, and one load of the scene's size: no log, no read of the game's context, no wait"});
     out.push_back({"write-split", !has(unlocked, "SRWLock") && has(unlocked, "VirtualProtect(") && inOrder(locked, {"AcquireSRWLockExclusive(&g_floatLock);", "writeFloatsUnlocked(f,lineF,ss);", "ReleaseSRWLockExclusive(&g_floatLock);"}),
                    "writeFloats is the lock around writeFloatsUnlocked, which takes none (the sections call the second under the lock they hold)"});
@@ -517,10 +517,10 @@ void testWiring() {
         {"hold-then-wait-return", "if (step.act == UiFlatPanelSettle::Act::kWait || step.act == UiFlatPanelSettle::Act::kKeep) return;", ""},
         {"hold-then-wait-return", "if (!wrote) return;", ""},
         {"env-lock", "void lock() { AcquireSRWLockExclusive(&g_floatLock); }", "void lock() {}"},
-        {"env-nothing-slow", "bool writeFactors(double f, double lineF, double ss) { return writeFloatsUnlocked(f, lineF, ss); }",
+        {"env-nothing-slow", "bool writeFactors(double f, double lineF, double ss) { return admitted() && writeFloatsUnlocked(f, lineF, ss); }",
                              "bool writeFactors(double f, double lineF, double ss) { return writeFloats(f, lineF, ss); }"},
         {"env-nothing-slow", "    void noteMove(bool flat, uint64_t publishedDims) {\n", "    void noteMove(bool flat, uint64_t publishedDims) {\n        Log::get().note(\"moved\");\n"},
-        {"write-split", "    const bool ok = writeFloatsUnlocked(f, lineF, ss);\n    ReleaseSRWLockExclusive(&g_floatLock);", "    const bool ok = writeFloatsUnlocked(f, lineF, ss);"},
+        {"write-split", "    const bool ok = !g_resizeInProgress.load(std::memory_order_acquire) && writeFloatsUnlocked(f, lineF, ss);\n    ReleaseSRWLockExclusive(&g_floatLock);", "    const bool ok = !g_resizeInProgress.load(std::memory_order_acquire) && writeFloatsUnlocked(f, lineF, ss);"},
         {"move-through-section", "uiPanelSetterSection(env, ss);", ""},
         {"thunk-records", "g_flatSetterEpoch.fetch_add(1, std::memory_order_acq_rel);", ""},
         {"thunk-records", "g_flatSetterAt.store(at, std::memory_order_release);", ""},

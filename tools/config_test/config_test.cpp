@@ -41,6 +41,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -51,6 +53,10 @@
 #include <vector>
 
 #include "../../src/common/config.h"
+#include "game_render_scale_request_tests.h"
+#include "../../src/common/iniedit.h"
+#include "../../src/d3d11/menu_write.h"
+#include "../../src/common/fsr4_quality.h"
 #include "../../src/common/ini_name.h"
 #include "../../src/common/real_dll_choice.h"
 #include "../../src/common/runtime_profile.h"
@@ -704,6 +710,94 @@ static std::wstring exeDirectory() {
 // carries a different dead line and a different moved key, so a message about the wrong file
 // shows in the text as well as in the name.
 //
+// Real Config identity plus the production writer; this runs in the ini-free child.
+static void profileWriteFixtures(const std::wstring& scratch) {
+    const std::wstring dir = scratch + L"_profile_writes";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    removeIniFile(dir, kIniNameFlatW);
+    const std::string shared = "[fix]\r\nrender_sharpness = 0.2\r\n[other]\r\nkeep = original\r\n";
+    writeIni(dir, "[install]\r\nschema = 2\r\nscope = both\r\n", L"edvr_profile.ini");
+    writeIni(dir, shared.c_str());
+    pinGraphicsMode(scratch + L"_profile_writes_localappdata", 0);
+    Config& cfg = Config::get();
+    cfg.init(dir);
+    auto expect = [](bool yes, const char* what) { if (yes) ok(what); else fail(what, "profile writer contract failed"); };
+    const SettingsWriteTarget flat = cfg.captureWriteTarget();
+    expect(flat.profile == RuntimeProfile::Flat && flat.allowSeed && flat.path == dir + L"\\edvr-flat.ini" &&
+           flat.fallbackSource == dir + L"\\edvr.ini", "flat fallback captures a separate destination and whole source");
+    SettingsWriteSideEffects effects;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool waiting = false, released = false;
+    WriteJob job;
+    job.target = flat;
+    job.dotted = "fix.render_sharpness";
+    job.value = "0.75";
+    WriteDone done;
+    std::thread worker([&] {
+        done = runMenuWrite(job, [&](const WriteJob& w, std::string* error) {
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                waiting = true;
+                cv.notify_one();
+                cv.wait(lock, [&] { return released; });
+            }
+            return writeSettingsPairs(w.target, {{w.dotted, w.value}}, effects, error);
+        });
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return waiting; });
+    }
+    g_runtimeProfile = RuntimeProfile::Vr;
+    cfg.switchProfile();
+    const SettingsWriteTarget vr = cfg.captureWriteTarget();
+    const std::string external = shared + "external = survives\r\n";
+    rewriteIni(dir, external); // edit while the originating Flat job is delayed
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+    }
+    cv.notify_one();
+    worker.join();
+    expect(done.ok && readRepoFile(dir, kIniNameVrW) == external,
+           "delayed flat seed leaves shared VR bytes unchanged");
+    const std::string seeded = readRepoFile(dir, kIniNameFlatW);
+    expect(iniValue(seeded, "fix.render_sharpness") == "0.75" && iniValue(seeded, "other.external") == "survives",
+           "flat seed rereads and preserves concurrent unrelated source edits");
+    expect(!cfg.completeWriteTarget(flat) && cfg.path() == vr.path,
+           "old Flat success cannot repick or reload active VR");
+    g_runtimeProfile = RuntimeProfile::Flat;
+    cfg.switchProfile();
+    const SettingsWriteTarget flatAgain = cfg.captureWriteTarget();
+    expect(flatAgain.epoch != flat.epoch && !cfg.completeWriteTarget(flat),
+           "Flat VR Flat has a new epoch and rejects the first Flat completion");
+    cfg.setRuntimeOverride("fix.temporal_aa", "off");
+    expect(cfg.completeWriteTarget(flatAgain) && cfg.hasRuntimeOverride("fix.temporal_aa") &&
+           cfg.captureWriteTarget().epoch == flatAgain.epoch,
+           "same profile completion reloads without clearing AA override or epoch");
+    // A seed completed while its originating Flat lifetime remains active also repicks.
+    removeIniFile(dir, kIniNameFlatW);
+    cfg.init(dir);
+    const SettingsWriteTarget seed = cfg.captureWriteTarget();
+    cfg.setRuntimeOverride("fix.temporal_aa", "off");
+    std::string error;
+    expect(writeSettingsPairs(seed, {{"fix.render_sharpness", "0.6"}}, effects, &error) &&
+           cfg.completeWriteTarget(seed) && cfg.path() == seed.path &&
+           cfg.hasRuntimeOverride("fix.temporal_aa") && cfg.captureWriteTarget().epoch == seed.epoch,
+           "successful seed repicks Flat within its originating lifetime and retains runtime override");
+    // Existing but exclusively opened: never use a readable fallback to overwrite it.
+    HANDLE locked = CreateFileW(seed.path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    expect(locked != INVALID_HANDLE_VALUE, "unreadable destination fixture locks the existing flat file");
+    expect(!writeSettingsPairs(seed, {{"fix.render_sharpness", "0.1"}}, effects, &error),
+           "existing unreadable destination refuses rather than falling back");
+    if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+    expect(!writeSettingsPairs({}, {{"fix.render_sharpness", "0.1"}}, effects, &error),
+           "unbound destination refuses writes");
+    cfg.clearRuntimeOverride("fix.temporal_aa");
+    (void)cfg.reloadIfChanged(); // drain this fixture's override notification before the existing switch fixtures
+}
+
 // Run only by iniNameFixturesIsolated(), in a process whose exe directory holds no ini: Config::init
 // looks in the exe's directory too (a flat process reads <exe dir>\edvr-flat.ini when its module
 // directory has none), and in the build that is build\, where the flat edition's staged
@@ -828,6 +922,7 @@ static void iniNameFixtures(const std::wstring& scratch) {
             ok((std::string(f.what) + ": nothing is said about the file it did not read").c_str());
         else fail((std::string(f.what) + ": it reported the file it did not read").c_str(), "a line of the other file is in the log");
     }
+    profileWriteFixtures(scratch);
     g_runtimeProfile = savedProfile;
     // The last line the parent looks for: a process that died part-way says nothing after its
     // failures, and "no failure lines" must not read as "all four ran".
@@ -1649,6 +1744,48 @@ static void switchProfileCases(const std::wstring& scratch) {
     runtimeProfileSet(savedProfile);
 }
 
+// Uses the real Config getter, with deterministic reload-generation changes at
+// the public reader boundary, to exercise the shared two-read snapshot adapter.
+static void fsr4QualityConfigCases() {
+    using namespace edvr::fsr4_quality;
+    const auto previousProfile = g_runtimeProfile.load();
+    g_runtimeProfile = RuntimeProfile::LegacyVr;
+    Request request;
+    check(readRequest(Config::get(), request) && request.valid && request.preset == Preset::Game &&
+          request.customScale == 0.75f, "FSR4 missing Config settings use Game and 0.75");
+    Config::get().set("fix.fsr4_quality", "custom");
+    Config::get().set("fix.fsr4_render_scale", "malformed");
+    check(Config::get().getFloat("fix.fsr4_render_scale", 0.75f) == 0.75f,
+          "numeric getter would mask malformed FSR4 custom");
+    check(readRequest(Config::get(), request) && !request.valid &&
+          request.reason == Refusal::InvalidCustomScale,
+          "FSR4 adapter reads raw Config string and refuses malformed custom");
+    Config::get().set("fix.fsr4_render_scale", "");
+    check(readRequest(Config::get(), request) && request.valid && request.customScale == 0.75f,
+          "FSR4 empty persisted Config scale defaults to 0.75");
+    struct ChangingConfig {
+        unsigned remaining = 0;
+        uint32_t generation() const { return Config::get().generation(); }
+        std::string getString(const char* key, const char* fallback) {
+            const auto result = Config::get().getString(key, fallback);
+            if (std::strcmp(key, "fix.fsr4_quality") == 0 && remaining) {
+                --remaining;
+                Config::get().set("fix.fsr4_render_scale", remaining ? "0.9" : "0.8");
+            }
+            return result;
+        }
+    } changing;
+    changing.remaining = 1;
+    check(readRequest(changing, request) && request.valid && request.customScale == 0.8f,
+          "FSR4 real Config generation retries once");
+    changing.remaining = 2;
+    check(!readRequest(changing, request) && request.customScale == 0.8f,
+          "FSR4 repeated real Config generation change retains current request");
+    Config::get().set("fix.fsr4_quality", "game");
+    Config::get().set("fix.fsr4_render_scale", "0.75");
+    g_runtimeProfile = previousProfile;
+}
+
 int main(int argc, char** argv) {
     // Unbuffered, so a crash does not take the output with it: the first run of
     // this test appeared to die before its first printf, which was only the
@@ -1825,6 +1962,9 @@ int main(int argc, char** argv) {
     expectStr("fix.cull_guard_fraction_v", "<unset>", "...its vertical fraction");
     expectStr("fix.cull_guard_headsets", "<unset>", "...its headset list");
     expectStr("advanced.cull_guard_channel", "<unset>", "...and its channel probe");
+    fsr4QualityConfigCases();
+    gameRenderScaleRequestTests([](bool pass, const char* label) { check(pass, label); });
+
     // ui_quality (docs/ui-layer-2026-09-23.md) is one key for both halves:
     // the interface panels made at the target's size, and the game's
     // post-tonemap UI drawn into a per-eye layer after the upscale. Values

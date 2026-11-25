@@ -2,6 +2,7 @@
 // held value for each (profile, mode known, mode, requested), and the toast text. Drives the very functions the DLL calls.
 // Built from the repo root by build.bat's :rig_vr_ssaa_hold_test. --dry-run writes nothing; --self-test runs the checks.
 #include "../../src/d3d11/vr_ssaa_hold_math.h"
+#include "../../src/d3d11/game_render_scale_pins.h"
 #include "../../src/d3d11/vr_display_config_guard.h"
 #include "../../src/d3d11/vr_window_trampolines.cpp"  // the production window request path (its hooks are not installed in this rig)
 
@@ -28,7 +29,18 @@ bool vrSsaaHoldReadSettings(int* mode, char* raw, size_t rawLen) {
     std::snprintf(raw, rawLen, "%d", g_stubSavedMode);
     return true;
 }
-void vrSsaaHoldAfterCopy(uintptr_t) {}
+std::vector<unsigned> g_copyOrder;
+uintptr_t g_copyContext = 0;
+float g_genuineCopiedSs = 0;
+void gameRenderScaleAfterSettingsCopy(uintptr_t context) noexcept {
+    g_copyOrder.push_back(2);
+    std::memcpy(&g_genuineCopiedSs, reinterpret_cast<void*>(context + renderscale::pins::kSs), sizeof(float));
+}
+void vrSsaaHoldAfterCopy(uintptr_t context) {
+    g_copyOrder.push_back(3);
+    const float held = 1.0f;
+    std::memcpy(reinterpret_cast<void*>(context + renderscale::pins::kSs), &held, sizeof(held));
+}
 bool g_stubWindow = true;       // vrDisplayReadGameWindow: the swap chain's window is hooked
 bool vrDisplayReadGameWindow(unsigned long long* style, long* clientWidth, long* clientHeight) {
     *style = 0x16CF0000ull;
@@ -573,6 +585,26 @@ int main(int argc, char** argv) {
     modeRequestTraceCases();
     rememberAtLaunchCases();
     installCases();
+    std::vector<uint8_t> renderer(0x1200);
+    std::vector<uint8_t> copiedContext(0x3800);
+    uintptr_t context = reinterpret_cast<uintptr_t>(copiedContext.data());
+    edvr::g_copyContext = context;
+    std::memcpy(renderer.data() + edvr::renderscale::pins::kRendererContext, &context, sizeof(context));
+    edvr::g_copyOrder.clear();
+    edvr::g_copyOrig = [](void*,void*,void*,void*,void*,void*,void*,void*) -> uint64_t {
+        edvr::g_copyOrder.push_back(1);
+        const float genuine = 0.65f;
+        std::memcpy(reinterpret_cast<void*>(edvr::g_copyContext + edvr::renderscale::pins::kSs), &genuine, sizeof(genuine));
+        return 0xabcdef;
+    };
+    check(edvr::copyReplacement(renderer.data(),nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr)==0xabcdef &&
+          edvr::g_copyOrder == std::vector<unsigned>({1,2,3}),
+          "settings copy observes genuine values after original and before ordinary VR SS hold");
+    float heldAfterCopy = 0;
+    std::memcpy(&heldAfterCopy, copiedContext.data() + edvr::renderscale::pins::kSs, sizeof(heldAfterCopy));
+    check(edvr::g_genuineCopiedSs == 0.65f && heldAfterCopy == 1.0f,
+          "genuine copied SS is retained before ordinary VR hold replaces the live value");
+
     if (g_fails) {
         std::printf("vr_ssaa_hold_test: %d of %d checks FAILED\n", g_fails, g_checks);
         return 1;

@@ -5,6 +5,7 @@
 #include "device_hook.h"     // deviceHookPanelSettings: DisplaySettings.xml's window size
 #include "vr_display_observer.h"  // vrDisplayReadGameWindow: the window the request produced
 #include "vr_ssaa_gate.h"    // vrSsaaGateFrame: the frame number the log carries
+#include "game_render_scale.h"
 #include "vr_ssaa_hold.h"    // vrSsaaHoldVrLive, vrSsaaHoldAfterCopy, vrSsaaHoldReadSettings
 #include "vr_window_gate.h"  // vrWindowRewriteAllowed: the rewrite's profile gate (VR launch stays rewritten in Passthrough)
 
@@ -342,6 +343,7 @@ uint64_t copyReplacement(void* a, void* b, void* c, void* d, void* e, void* f, v
     probe.stop();
     const uint64_t r = g_copyOrig(a, b, c, d, e, f, g, h);
     probe.restart();
+    if (ctx) gameRenderScaleAfterSettingsCopy(static_cast<uintptr_t>(ctx));
     if (ctx) vrSsaaHoldAfterCopy(static_cast<uintptr_t>(ctx));
     probe.stop();
     return r;

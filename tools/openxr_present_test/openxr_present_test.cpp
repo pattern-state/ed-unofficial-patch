@@ -628,6 +628,14 @@ int selfTest(const std::wstring& supplied, HookExpectation expectation=HookExpec
   check(preClient.acquire(L"d3d11.dll")==E_INVALIDARG&&!preClient.provider(),"native client rejects relative path before device creation");
   auto countsFn=reinterpret_cast<Counts::Fn>(GetProcAddress(proxy,"edvr_selftest_graphics_bridge")); check(countsFn!=nullptr,"graphics bridge counter export exists");
   PresentDevice present; check(SUCCEEDED(present.initialize(proxy,D3D_DRIVER_TYPE_WARP)),"initialize real WARP proxy device"); if (!present.swapchain()) return 1;
+  using OwnsPresent = bool (*)(ID3D11Device*);
+  auto ownsPresent = reinterpret_cast<OwnsPresent>(GetProcAddress(proxy,"edvr_selftest_render_boundary_owner"));
+  check(ownsPresent != nullptr, "read-only real Present owner query exists");
+  if (!ownsPresent) return 1;
+  check(!ownsPresent(present.device()), "no render thread ownership before first ordinary Present");
+  check(SUCCEEDED(present.swapchain()->Present(0,DXGI_PRESENT_TEST)) && !ownsPresent(present.device()),
+        "first TEST Present cannot establish render thread ownership");
+
   focusTargetContracts(present);
   if (expectation!=HookExpectation::Features) {
     transportContracts(proxy,present,expectation==HookExpectation::TransportOnly);
@@ -653,6 +661,22 @@ int selfTest(const std::wstring& supplied, HookExpectation expectation=HookExpec
   closeOrdering(proxy,present.swapchain(),present.device(),present.context());
   quiescentTeardown(proxy,present);
   callbackTeardown(proxy,present);
+  check(ownsPresent(present.device()) && !ownsPresent(nullptr), "ordinary first Present establishes exact device/thread ownership");
+  ComPtr<ID3D11Device> foreignDevice;
+  const auto createForeign=edvr::systemD3D11CreateDevice();
+  check(createForeign && SUCCEEDED(createForeign(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,
+                                                &foreignDevice,nullptr,nullptr)) && !ownsPresent(foreignDevice.Get()),
+        "same-adapter foreign device never owns quality boundary");
+  bool foreignOwns = true; HRESULT foreignResult = E_FAIL;
+  std::thread terminalForeign([&]{
+      foreignOwns = ownsPresent(present.device());
+      foreignResult = present.swapchain()->Present(0,0);
+      foreignOwns = foreignOwns || ownsPresent(present.device());
+  });
+  terminalForeign.join();
+  check(SUCCEEDED(foreignResult) && !foreignOwns && ownsPresent(present.device()),
+        "terminal foreign-thread Present cannot steal canonical Present ownership");
+
   if (expectation==HookExpectation::TransportOnly) {
     const auto hooks=reinterpret_cast<unsigned(__cdecl*)()>(GetProcAddress(proxy,"edvr_selftest_hooks"));
     check(hooks&&hooks()==0,"full Present and cleanup suite left optional vScreen hooks absent");

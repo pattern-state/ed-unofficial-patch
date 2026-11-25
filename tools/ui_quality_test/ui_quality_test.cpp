@@ -4598,6 +4598,7 @@ void testWriteBack(Gpu& g) {
 #include "ui_intro_curve_wiring_test.h"
 #include "ui_panel_budget_test.h"
 #include "ui_flat_panel_settle_test.h"
+#include "ui_game_resize_test.h"
 #include "ui_tone_scene_test.h"
 #include "ui_star_glow_test.h"
 #include "ui_vr_star_glow_test.h"
@@ -4623,6 +4624,13 @@ void testSeedReasonTally() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--game-resize-cpu") == 0) {
+        gameresize::testAll();
+        gameresize::testWiring(worldroute::readText("src/d3d11/ui_panel_scale.cpp"), worldroute::readText("src/d3d11/ui_surfaces.cpp"));
+        std::printf("ui_quality_test --game-resize-cpu: %u checks, %u failures\n", g_checks, g_fails);
+        return g_fails ? 1 : 0;
+    }
+
     if (argc == 2 && std::strcmp(argv[1], "--dry-run") == 0) {
         std::puts("ui_quality_test: dry-run (no device, no files)");
         return 0;
@@ -4687,6 +4695,8 @@ int main(int argc, char** argv) {
     panelbudget::testAll();
     panelbudget::testWiring();
     flatsettle::testAll();
+    gameresize::testAll();
+    gameresize::testWiring(worldroute::readText("src/d3d11/ui_panel_scale.cpp"), worldroute::readText("src/d3d11/ui_surfaces.cpp"));
     tonescene::testAll();
     starglowtest::testAll();
     vrstarglowtest::testAll();

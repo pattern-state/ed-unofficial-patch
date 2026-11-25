@@ -82,6 +82,7 @@ inline constexpr size_t kFlatVisualRowCount = sizeof(kFlatVisualRows) / sizeof(k
 inline constexpr FlatPageRow kFlatDebugRows[] = {
     {"advanced", "flat_cpu_timing",   FlatRowRead::Allowlist},
     {"advanced", "flat_refusal_view", FlatRowRead::Allowlist},
+    {"advanced", "temporal_aa_jitter_phases", FlatRowRead::Allowlist},  // TEMPORARY: Flight A jitter A/B, not for commit
 };
 inline constexpr size_t kFlatDebugRowCount = sizeof(kFlatDebugRows) / sizeof(kFlatDebugRows[0]);
 // The generated page name the Debug rows carry (the `menu debug` token).

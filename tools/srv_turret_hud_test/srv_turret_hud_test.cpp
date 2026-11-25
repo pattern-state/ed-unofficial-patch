@@ -2449,8 +2449,14 @@ static void constantsCases() {
     ComPtr<ID3D11Device> d2;
     ComPtr<ID3D11DeviceContext> c2;
     ck(edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &d2, nullptr, &c2), "second device");
+    // get() releases its old buffer before allocating for the new device.
+    // Keep the old object alive so allocator address reuse cannot mimic reuse.
+    ComPtr<ID3D11Buffer> retainedFirst = first;
     ID3D11Buffer* other = c.get(c2.Get(), p0);
     check(other && other != first && c.written() == p0, "another device: the buffer is made again for it");
+    ComPtr<ID3D11Device> otherDevice;
+    if (other) other->GetDevice(&otherDevice);
+    check(otherDevice.Get() == d2.Get(), "another device: the recreated buffer belongs to that device");
     c.reset();
     check(c.buffer() == nullptr && !c.failed(), "reset releases the buffer");
     // the production arrays also carry the key defaults the module reads

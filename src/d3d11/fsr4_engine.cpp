@@ -60,6 +60,16 @@ namespace {
 
 constexpr size_t kReasonBytes = 512;
 
+static_assert(Fsr4DispatchObservations::slotCount == kUpscalerSlots, "observation slots match engine slots");
+SRWLOCK g_dispatchLock = SRWLOCK_INIT;
+Fsr4DispatchObservations g_dispatch;
+
+void invalidateDispatch(const char* reason) {
+    AcquireSRWLockExclusive(&g_dispatchLock);
+    g_dispatch.invalidate(reason);
+    ReleaseSRWLockExclusive(&g_dispatchLock);
+}
+
 // "fsr 4.1.2", or "fsr 4.1.1 (Proton driver provider)", once a context has reported its provider (fsr4VersionLabel,
 // fsr4ServedLabel); "fsr4" before. Plain storage, no static destructor. Render thread, as its readers are.
 char g_label[40] = "fsr4";
@@ -1135,10 +1145,8 @@ const char* fsr4VersionLabel() { return g_label; }
 
 #if EDVR_HAVE_FSR4
 std::string fsr4RowLabel() { return fsr4RowLabelFor(servedNow()); }
-std::string fsr4StatusLine() { return fsr4StatusLineFor(servedNow()); }
 #else
 std::string fsr4RowLabel() { return fsr4RowLabelFor(notBuiltServed()); }
-std::string fsr4StatusLine() { return fsr4StatusLineFor(notBuiltServed()); }
 #endif
 
 bool fsr4Available(ID3D11Device* dev, const char** why) {
@@ -1207,7 +1215,7 @@ bool fsr4Available(ID3D11Device* dev, const char** why) {
 #endif
 }
 
-bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colour,
+static bool fsr4EvaluateImpl(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colour,
                   ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* out,
                   uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, float jx, float jy,
                   bool reset, float frameMs, float nearZ, float farZ, float fovY,
@@ -1533,7 +1541,57 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
 #endif
 }
 
+void fsr4SetObservationEpoch(uint64_t epoch) {
+    AcquireSRWLockExclusive(&g_dispatchLock);
+    g_dispatch.setEpoch(epoch);
+    ReleaseSRWLockExclusive(&g_dispatchLock);
+}
+
+Fsr4DispatchStatus fsr4DispatchStatus(unsigned slot) {
+    AcquireSRWLockShared(&g_dispatchLock);
+    const auto copy = g_dispatch.snapshot(slot);
+    ReleaseSRWLockShared(&g_dispatchLock);
+    return copy;
+}
+
+bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colour,
+                  ID3D11Texture2D* depth, ID3D11Texture2D* mv, ID3D11Texture2D* out,
+                  uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, float jx, float jy,
+                  bool reset, float frameMs, float nearZ, float farZ, float fovY,
+                  const char** why, bool infiniteDepth, bool hdr) {
+    AcquireSRWLockExclusive(&g_dispatchLock);
+    const auto attempt = g_dispatch.begin(slot, w, h, outW, outH);
+    ReleaseSRWLockExclusive(&g_dispatchLock);
+    // Always collect the engine reason, including callers that supply no why.
+    const char* reason = nullptr;
+    const bool submitted = fsr4EvaluateImpl(ctx, slot, colour, depth, mv, out, w, h, outW, outH, jx, jy,
+                                           reset, frameMs, nearZ, farZ, fovY, &reason, infiniteDepth, hdr);
+    AcquireSRWLockExclusive(&g_dispatchLock);
+    g_dispatch.finish(attempt, submitted, reason);
+    ReleaseSRWLockExclusive(&g_dispatchLock);
+    if (why) *why = reason;
+    return submitted;
+}
+
+std::string fsr4StatusLine(bool flat) {
+#if EDVR_HAVE_FSR4
+    const auto served = servedNow();
+#else
+    const auto served = notBuiltServed();
+#endif
+    // Keep provider selection in its existing owner, but never use context
+    // creation sizes as evidence that a submission succeeded.
+    if (served.offer != Fsr4Offer::Served) return fsr4StatusLineFor(served);
+    std::string line = fsr4RowLabelFor(served);
+    Fsr4DispatchStatus slots[kUpscalerSlots];
+    AcquireSRWLockShared(&g_dispatchLock);
+    for (unsigned slot = 0; slot < kUpscalerSlots; ++slot) slots[slot] = g_dispatch.snapshot(slot);
+    ReleaseSRWLockShared(&g_dispatchLock);
+    return fsr4DispatchStatusText(line, slots, flat);
+}
+
 void fsr4ReleaseFeatures() {
+    invalidateDispatch("features released; awaiting submission");
 #if EDVR_HAVE_FSR4
     if (!g_state) return;
     // The profile switch releases every slot. Each release has its own bounded GPU wait, so one slot's refusal does not keep the
@@ -1547,6 +1605,7 @@ void fsr4ReleaseFeatures() {
 }
 
 void fsr4Shutdown() {
+    invalidateDispatch("backend shut down; awaiting submission");
 #if EDVR_HAVE_FSR4
     if (g_state) {
         Log::get().note("fsr4: session evaluations=%u resets=%u failures=%u",

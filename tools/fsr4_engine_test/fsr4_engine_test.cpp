@@ -34,6 +34,8 @@
 
 #include "../../src/common/log.h"
 #include "../../src/d3d11/fsr4_engine.h"
+#include "../../src/d3d11/fsr4_dispatch_status.h"
+#include "../../src/common/fsr4_quality.h"
 #include "../../src/d3d11/fsr4_version.h"
 #include "../../src/d3d11/hdr_backend_flags.h"
 #include "../xess_engine_test/unsupported_device.h"   // a D3D11 device that supports nothing; nothing in it is XeSS-specific
@@ -391,9 +393,91 @@ bool entriesSelfTest() {
            check(!edvr::fsr4SlotTotals(0, &evaluations, &resets, &avg, &max), "no totals before a slot has evaluated");
 }
 
+// Exercises the production reducer, without manufacturing SDK/GPU success.
+bool dispatchStatusSelfTest() {
+    using namespace edvr;
+    Fsr4DispatchObservations observations;
+    observations.setEpoch(10);
+    auto old = observations.begin(0, 128, 128, 192, 192);
+    auto s = observations.snapshot(0);
+    if (!check(s.epoch == 10 && s.outcome == Fsr4DispatchOutcome::Pending && !s.lastSubmitted.valid,
+               "context-only work is pending, never submitted")) return false;
+    observations.finish(old, true, nullptr);
+    s = observations.snapshot(0);
+    if (!check(s.outcome == Fsr4DispatchOutcome::Submitted && s.lastSubmitted.valid && s.lastSubmitted.inW == 128,
+               "only completed evaluate records submission")) return false;
+    auto failed = observations.begin(0, 128, 128, 192, 192);
+    observations.finish(failed, false, "same-size failure");
+    s = observations.snapshot(0);
+    if (!check(s.outcome == Fsr4DispatchOutcome::Failed && std::strcmp(s.reason, "same-size failure") == 0 &&
+               s.lastSubmitted.valid, "latest same-size failure beats historical success")) return false;
+    auto resized = observations.begin(0, 160, 160, 240, 240);
+    observations.finish(resized, false, nullptr);
+    s = observations.snapshot(0);
+    if (!check(s.inW == 160 && s.outW == 240 && s.lastSubmitted.inW == 128 && s.reason[0],
+               "resized failure retains attempted sizes and reason without caller why")) return false;
+    auto newer = observations.begin(0, 144, 144, 192, 192);
+    observations.finish(resized, true, nullptr);
+    if (!check(observations.snapshot(0).outcome == Fsr4DispatchOutcome::Pending,
+               "older attempt cannot replace newer pending work")) return false;
+    observations.setEpoch(11);
+    observations.finish(newer, true, nullptr);
+    if (!check(observations.snapshot(0).epoch == 11 && observations.snapshot(0).outcome == Fsr4DispatchOutcome::Pending,
+               "old epoch completion cannot acknowledge new request")) return false;
+    const auto left = observations.begin(0, 128, 128, 192, 192);
+    observations.finish(left, true, nullptr);
+    const auto world = observations.begin(2, 128, 128, 192, 192);
+    observations.finish(world, true, nullptr);
+    if (!check(observations.snapshot(0).outcome == Fsr4DispatchOutcome::Submitted &&
+               observations.snapshot(1).outcome == Fsr4DispatchOutcome::Pending &&
+               observations.snapshot(2).outcome == Fsr4DispatchOutcome::Submitted,
+               "left and world cannot acknowledge the right eye")) return false;
+    const auto right = observations.begin(1, 128, 128, 192, 192);
+    observations.finish(right, true, nullptr);
+    observations.setEpoch(11);
+    if (!check(observations.snapshot(1).outcome == Fsr4DispatchOutcome::Submitted,
+               "unchanged epoch preserves current evidence")) return false;
+    observations.invalidate("features released");
+    observations.finish(right, true, nullptr);
+    if (!check(observations.snapshot(0).outcome == Fsr4DispatchOutcome::Pending &&
+               observations.snapshot(1).outcome == Fsr4DispatchOutcome::Pending &&
+               observations.snapshot(2).outcome == Fsr4DispatchOutcome::Pending,
+               "release invalidates all slots and late completions")) return false;
+    const auto afterRelease = observations.begin(1, 128, 128, 192, 192);
+    observations.invalidate("shutdown");
+    observations.finish(afterRelease, true, nullptr);
+    if (!check(observations.snapshot(1).outcome == Fsr4DispatchOutcome::Pending,
+               "shutdown invalidates even an in-flight attempt")) return false;
+    const auto failedLatest = observations.begin(0, 150, 151, 192, 192);
+    observations.finish(failedLatest, false, "latest failed");
+    observations.finish(left, true, nullptr);
+    if (!check(observations.snapshot(0).outcome == Fsr4DispatchOutcome::Failed &&
+               std::strcmp(observations.snapshot(0).reason, "latest failed") == 0,
+               "stale success cannot overwrite newer failure")) return false;
+    return check(!observations.begin(3, 1, 1, 1, 1).valid, "bad slots refuse");
+}
+
+bool dispatchEntriesSelfTest() {
+    edvr::fsr4SetObservationEpoch(100);
+    const bool refused = !edvr::fsr4Evaluate(nullptr, 0, nullptr, nullptr, nullptr, nullptr,
+                                            71, 73, 101, 103, 0, 0, false, 0, 0, 0, 0, nullptr);
+    auto s = edvr::fsr4DispatchStatus(0);
+    if (!check(refused && s.epoch == 100 && s.inW == 71 && s.inH == 73 && s.outW == 101 && s.outH == 103 &&
+               s.outcome == edvr::Fsr4DispatchOutcome::Failed && s.reason[0],
+               "real evaluate wrapper records attempted sizes and failure with null why")) return false;
+    edvr::fsr4ReleaseFeatures();
+    if (!check(edvr::fsr4DispatchStatus(0).outcome == edvr::Fsr4DispatchOutcome::Pending,
+               "real release invalidates status even with no backend")) return false;
+    edvr::fsr4SetObservationEpoch(101);
+    edvr::fsr4Shutdown();
+    s = edvr::fsr4DispatchStatus(0);
+    return check(s.epoch == 101 && s.outcome == edvr::Fsr4DispatchOutcome::Pending && !s.lastSubmitted.valid,
+                 "real shutdown invalidates without inventing a historical submission");
+}
+
 bool selfTest() {
-    const bool good = versionSelfTest() && latchSelfTest() && formatSelfTest() && flagsSelfTest() && cameraSelfTest() &&
-                      entriesSelfTest();
+    const bool good = dispatchStatusSelfTest() && versionSelfTest() && latchSelfTest() && formatSelfTest() &&
+                      flagsSelfTest() && cameraSelfTest() && entriesSelfTest() && dispatchEntriesSelfTest();
     edvr::fsr4Shutdown();
     if (good) std::fprintf(stderr, "fsr4_engine_test: self-test PASS (FSR 4 SDK %s in this build)\n",
                            edvr::fsr4BuiltIn() ? "compiled" : "not compiled");
@@ -492,6 +576,7 @@ bool anyNonZero(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Textur
 
 struct FlightSpec {
     UINT w = 128, h = 128, outW = 192, outH = 192;
+    uint64_t epoch = 200;
     bool hdr = false;
     bool infinite = false;
     UINT pad = 0;               // the render-grid textures are (w + pad) x (h + pad): the engine box-copies the corner
@@ -504,6 +589,7 @@ struct FlightSpec {
 // frame was accepted and the output holds something. A refusal comes back through failureReason.
 bool flight(ID3D11Device* device, ID3D11DeviceContext* context, const FlightSpec& spec, const char** failureReason = nullptr) {
     if (failureReason) *failureReason = nullptr;
+    edvr::fsr4SetObservationEpoch(spec.epoch);
     const DXGI_FORMAT colourFormat = spec.hdr ? DXGI_FORMAT_R11G11B10_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
     const DXGI_FORMAT outFormat = spec.hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
     const UINT inBinds = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -532,6 +618,11 @@ bool flight(ID3D11Device* device, ID3D11DeviceContext* context, const FlightSpec
             std::fprintf(stderr, "fsr4_engine_test: frame %u refused: %s\n", frame, why ? why : "unspecified");
             return false;
         }
+        const auto status = edvr::fsr4DispatchStatus(spec.slot);
+        if (!check(status.epoch == spec.epoch && status.outcome == edvr::Fsr4DispatchOutcome::Submitted &&
+                   status.inW == spec.w && status.inH == spec.h && status.outW == spec.outW && status.outH == spec.outH &&
+                   status.lastSubmitted.valid && status.lastSubmitted.sequence == status.sequence,
+                   "real final submission snapshot matches this slot and dimensions")) return false;
     }
     if (!check(anyNonZero(device, context, output.Get()), "D3D11 readback of the output holds a nonzero byte")) return false;
     std::fprintf(stderr, "fsr4_engine_test: PASS %s%s%s%s %ux%u -> %ux%u, %u frames slot=%u\n", spec.hdr ? "HDR" : "LDR",
@@ -552,8 +643,20 @@ bool depthStencilRefusal(ID3D11Device* device, ID3D11DeviceContext* context) {
     const char* why = nullptr;
     const bool refused = !edvr::fsr4Evaluate(context, 0, colour.Get(), depth.Get(), motion.Get(), output.Get(), 128, 128, 192, 192,
                                              0.25f, 0.25f, false, 11.1f, 0.1f, 1000.0f, 1.0f, &why);
-    return check(refused && why && std::strstr(why, "depth-stencil") != nullptr,
-                 "a depth-stencil bound depth larger than the render size is refused with a reason");
+    const auto status = edvr::fsr4DispatchStatus(0);
+    if (!check(refused && why && std::strstr(why, "depth-stencil") != nullptr &&
+               status.outcome == edvr::Fsr4DispatchOutcome::Failed && status.inW == 128 && status.outW == 192 &&
+               std::strstr(status.reason, "depth-stencil") != nullptr && status.lastSubmitted.valid,
+               "invalid real resource records current failure and retains only historical success")) return false;
+    const bool resizedRefusal = !edvr::fsr4Evaluate(context, 0, colour.Get(), depth.Get(), motion.Get(), output.Get(),
+                                                    127, 125, 192, 192, 0.25f, 0.25f, false, 11.1f,
+                                                    0.1f, 1000.0f, 1.0f, nullptr);
+    const auto resized = edvr::fsr4DispatchStatus(0);
+    return check(resizedRefusal && resized.outcome == edvr::Fsr4DispatchOutcome::Failed &&
+                 resized.inW == 127 && resized.inH == 125 && resized.lastSubmitted.inW == status.lastSubmitted.inW &&
+                 std::strstr(resized.reason, "depth-stencil") != nullptr &&
+                 edvr::fsr4StatusLine().find("historical last submission") != std::string::npos,
+                 "resized resource failure with null why remains current, with historical success labelled");
 }
 
 // Releasing a slot frees its context without counting a rebuild; the next evaluation at the same key builds one more; a new
@@ -562,14 +665,19 @@ bool releaseAndRecreate(ID3D11Device* device, ID3D11DeviceContext* context) {
     edvr::fsr4ReleaseFeatures();
     const uint32_t base0 = edvr::fsr4TestContextCreations(0);
     const uint32_t base1 = edvr::fsr4TestContextCreations(1);
-    if (!check(!edvr::fsr4TestContextLive(0) && !edvr::fsr4TestContextLive(1), "release leaves no slot live")) return false;
+    if (!check(!edvr::fsr4TestContextLive(0) && !edvr::fsr4TestContextLive(1) &&
+               edvr::fsr4DispatchStatus(0).outcome == edvr::Fsr4DispatchOutcome::Pending &&
+               edvr::fsr4DispatchStatus(1).outcome == edvr::Fsr4DispatchOutcome::Pending,
+               "release leaves no slot live or acknowledged")) return false;
     FlightSpec spec;
     if (!flight(device, context, spec)) return false;
     if (!check(edvr::fsr4TestContextLive(0) && !edvr::fsr4TestContextLive(1) &&
                edvr::fsr4TestContextCreations(0) == base0 + 1 && edvr::fsr4TestContextCreations(1) == base1,
                "slot 0 builds alone")) return false;
+    ++spec.epoch;
     if (!flight(device, context, spec)) return false;
-    if (!check(edvr::fsr4TestContextCreations(0) == base0 + 1, "the same key keeps its context")) return false;
+    if (!check(edvr::fsr4TestContextCreations(0) == base0 + 1,
+               "a new observation epoch at the same key keeps its context")) return false;
     FlightSpec other = spec;
     other.slot = 1;
     other.w = 160; other.h = 160; other.outW = 240; other.outH = 240;
@@ -613,11 +721,42 @@ bool rebindAfterFailedProbe(ID3D11Device* device, ID3D11DeviceContext* context) 
     return flight(device, context, FlightSpec{});
 }
 
+// Fixed production output sizes, all named managed presets and custom cases,
+// traversed both ways on each eye. Keep format permutations in the small rigs.
+bool qualityFlights(ID3D11Device* device, ID3D11DeviceContext* context) {
+    using namespace edvr::fsr4_quality;
+    const float scales[] = {scaleFor(Preset::UltraPerformance), scaleFor(Preset::Performance),
+                            scaleFor(Preset::Balanced), scaleFor(Preset::Quality), 0.75f, 0.99f, scaleFor(Preset::Native)};
+    const unsigned outputs[][2] = {{5120, 1440}, {2528, 2704}};
+    uint64_t epoch = 300;
+    for (const auto& output : outputs) {
+        for (unsigned slot = 0; slot < 2; ++slot) {
+            for (unsigned direction = 0; direction < 2; ++direction) {
+                for (unsigned step = 0; step < 7; ++step) {
+                    const unsigned index = direction ? 6 - step : step;
+                    FlightSpec spec;
+                    spec.outW = output[0]; spec.outH = output[1];
+                    if (!check(scaledDimension(spec.outW, scales[index], spec.w) &&
+                               scaledDimension(spec.outH, scales[index], spec.h), "quality fixture dimensions")) return false;
+                    spec.slot = slot;
+                    spec.frames = 2;
+                    spec.epoch = ++epoch;
+                    if (!flight(device, context, spec)) return false;
+                    if (!check(edvr::fsr4RowLabel().rfind("FSR 4.", 0) == 0,
+                               "every quality fixture is served by a 4.x provider")) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // The GPU half. A refusal with a reason is a pass unless strict.
 int gpuTest(bool optional) {
     if (!edvr::fsr4BuiltIn()) {
-        std::puts("fsr4_engine_test: SKIP no AMD FSR 4 SDK in this build; the self-test covers the refusal");
-        return 0;
+        const bool skip = optional;
+        std::fprintf(skip ? stdout : stderr, "fsr4_engine_test: %s no AMD FSR 4 SDK in this build\n", skip ? "SKIP" : "FAILED");
+        return skip ? 0 : 1;
     }
     if (optional) {
         const Probe adapters = hardwareAdapterPresent();
@@ -684,7 +823,11 @@ int gpuTest(bool optional) {
     good = good && depthStencilRefusal(device.Get(), context.Get());
     good = good && releaseAndRecreate(device.Get(), context.Get());
     good = good && rebindAfterFailedProbe(device.Get(), context.Get());
+    if (!optional) good = good && qualityFlights(device.Get(), context.Get());
     edvr::fsr4Shutdown();
+    good = good && check(edvr::fsr4DispatchStatus(0).outcome == edvr::Fsr4DispatchOutcome::Pending &&
+                         edvr::fsr4DispatchStatus(1).outcome == edvr::Fsr4DispatchOutcome::Pending,
+                         "shutdown invalidates submitted eyes");
     return good ? 0 : 1;
 }
 }  // namespace
@@ -695,7 +838,8 @@ int main(int argc, char** argv) {
         std::puts("fsr4_engine_test: plan -- --self-test: version pick (only 3.1.5 refuses; 3.1.5 and 4.1.1 picks 4.1.1; 4.1.2 preferred over a "
                   "higher 4.x; prefixed and garbage names), served labels, the F8 row label and status line, "
                   "refusal text, typed formats, creation and dispatch flags, camera planes, frame time, failure latch, slot range, "
-                  "null device, failed probe; --gpu-test-if-available: availability or a clean refusal, then LDR and HDR 128x128 -> 192x192 "
+                  "null device, failed probe, epoch/attempt/eye submission observations; strict --gpu-test adds all quality ratios "
+                  "in both directions at fixed 5120x1440 and 2528x2704 output on both eyes; --gpu-test-if-available: availability or a clean refusal, then LDR and HDR 128x128 -> 192x192 "
                   "with a nonzero-output readback, box copy, release and re-create counts. No file or device is created by --dry-run.");
         return 0;
     }

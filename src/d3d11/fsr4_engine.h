@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <string>
 
+#include "fsr4_dispatch_status.h"
+
 #include "dlaa.h"   // kUpscalerSlots: slots 0 and 1 are the eyes', 2 the VR world route's; flat uses 0
 
 struct ID3D11Device;
@@ -46,6 +48,11 @@ bool fsr4Evaluate(ID3D11DeviceContext* ctx, unsigned slot, ID3D11Texture2D* colo
                   bool reset, float frameMs, float nearZ, float farZ, float fovY,
                   const char** why, bool infiniteDepth = false, bool hdr = false);
 
+// Any thread, copied under the observation lock. Submitted means the output
+// copy, consumer signal and flush were queued; it does not prove GPU completion.
+void fsr4SetObservationEpoch(uint64_t epoch);
+Fsr4DispatchStatus fsr4DispatchStatus(unsigned slot);
+
 // Releases every slot's context (each after its bounded GPU wait) and clears the create-failure latches; the DLLs
 // and the D3D12 device stay loaded. For a size, profile or engine change. Render thread only. Safe when FSR 4
 // never started.
@@ -65,9 +72,9 @@ const char* fsr4VersionLabel();
 // a build without the SDK). Any thread: a copy taken under the engine's lock.
 std::string fsr4RowLabel();
 
-// The F8 status line for fsr4: the served version and render -> output size ("FSR 4.1.2: 2560x1440 -> 3840x2160"),
-// or "FSR 4 unavailable: " and the refusal reason. Any thread, as fsr4RowLabel.
-std::string fsr4StatusLine();
+// F8 provider identity plus per-slot current submission outcomes and attempted
+// sizes. Older successful sizes are explicitly historical. Any thread.
+std::string fsr4StatusLine(bool flat = false);
 
 // The slot's measured price, as xessSlotTotals gives XeSS's: evaluations, resets, and the mean and maximum CPU
 // milliseconds per successful evaluate. False until the slot has evaluated, and in a build without the SDK.
